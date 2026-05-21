@@ -27,16 +27,33 @@ from homography_align import (
 )
 from pharaon_cv import orb_ransac_inliers, verdict_for
 from puzzles_batch_h import split_reference  # canonical splitter (rounded float)
-from frame_detect import detect_cube_quads
 
 ROOT = Path(__file__).parent
 TESTS_DIR = ROOT / "tests"
 UPLOADS_DIR = ROOT / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
-ORB_INLIERS_MIN = 10  # per-slot match threshold
+ORB_INLIERS_MIN = 10        # per-slot match threshold
+H_INLIERS_MIN_RECOGNIZE = 8  # minimum homography inliers to claim "this is puzzle X"
 
 app = Flask(__name__)
+
+# Cache all reference images on first access so we don't re-read from disk on every request.
+_REF_CACHE: dict[str, np.ndarray] = {}
+
+
+def load_all_references() -> dict[str, np.ndarray]:
+    if not _REF_CACHE:
+        if TESTS_DIR.exists():
+            for d in sorted(TESTS_DIR.iterdir()):
+                if not d.is_dir():
+                    continue
+                ref_path = d / "ref.png"
+                if ref_path.exists():
+                    img = cv2.imread(str(ref_path))
+                    if img is not None:
+                        _REF_CACHE[d.name] = img
+    return _REF_CACHE
 
 
 # ---------- puzzle catalogue ----------
@@ -136,29 +153,71 @@ def run_method_a(photo: np.ndarray, reference: np.ndarray) -> dict:
     }
 
 
-def run_method_b(photo: np.ndarray, reference: np.ndarray) -> dict:
-    """Method B: detect 9 cube quads directly in the photo (no reference needed
-    for localization), then match each cube against the reference's 9 cells."""
-    quads, info = detect_cube_quads(photo)
-    if quads is None:
+def run_method_b(photo: np.ndarray, selected_puzzle_id: str, selected_reference: np.ndarray) -> dict:
+    """Method B: multi-reference homography auto-detect.
+
+    Tries homography against all 6 puzzle references. The reference with the
+    most inliers identifies which puzzle is *physically* in the photo. We use
+    that detected puzzle's projected quads as the 9 cube ROIs (so the overlay
+    is always correct), then run per-slot matching against the user's
+    *selected* reference. If the detected puzzle differs from the selected
+    puzzle, we report NOT_SOLVED with a "wrong puzzle" diagnostic regardless
+    of per-slot scores.
+    """
+    all_refs = load_all_references()
+
+    per_puzzle: list[dict] = []
+    best_id: str | None = None
+    best_H = None
+    best_inliers = 0
+    best_good = 0
+    for pid, ref_img in all_refs.items():
+        H, inliers, good = find_homography(photo, ref_img)
+        per_puzzle.append({"puzzle": pid, "h_inliers": inliers, "good_matches": good})
+        if H is not None and inliers > best_inliers:
+            best_id, best_H = pid, H
+            best_inliers, best_good = inliers, good
+
+    per_puzzle.sort(key=lambda r: -r["h_inliers"])
+
+    if best_H is None or best_inliers < H_INLIERS_MIN_RECOGNIZE:
         return {
             "ok": False,
             "method": "B",
-            "name": "Frame detect (markerless grid)",
-            "error": f"Frame detection failed: {info.get('fail_reason', 'unknown')}",
-            "detector_info": info,
+            "name": "Multi-reference homography (auto-detect)",
+            "error": "Could not recognize any of the known puzzles in this photo.",
+            "per_puzzle": per_puzzle,
         }
-    ref_cells = split_reference(reference)
+
+    # Project the 9 ROI quads from the DETECTED puzzle's reference
+    detected_ref = all_refs[best_id]
+    quads = project_cells(best_H, detected_ref)
+
+    # Per-slot match against the SELECTED puzzle's reference
+    ref_cells = split_reference(selected_reference)
     photo_slots = [warp_quad(photo, q, out_size=256) for q in quads]
     slots = _score_slots(photo_slots, ref_cells)
+    summary = _summarise(slots)
+
+    is_wrong_puzzle = best_id != selected_puzzle_id
+    if is_wrong_puzzle:
+        # Force NOT_SOLVED regardless of slot scores when the wrong puzzle is selected.
+        summary["verdict"] = "NOT_SOLVED"
+
     overlay = _draw_verdict_overlay(photo, quads, slots)
+
     return {
         "ok": True,
         "method": "B",
-        "name": "Frame detect (markerless grid)",
-        "detector_info": info,
+        "name": "Multi-reference homography (auto-detect)",
+        "detected_puzzle": best_id,
+        "detected_h_inliers": best_inliers,
+        "detected_good_matches": best_good,
+        "is_wrong_puzzle": is_wrong_puzzle,
+        "selected_puzzle": selected_puzzle_id,
+        "per_puzzle": per_puzzle,
         "slots": slots,
-        **_summarise(slots),
+        **summary,
         "_overlay": overlay,
     }
 
@@ -205,7 +264,7 @@ def check():
 
     run_id = uuid.uuid4().hex[:10]
     method_a = run_method_a(photo, reference)
-    method_b = run_method_b(photo, reference)
+    method_b = run_method_b(photo, puzzle_id, reference)
 
     for tag, result in (("a", method_a), ("b", method_b)):
         if result.get("ok"):
@@ -487,8 +546,11 @@ function renderMethodCard(m) {
   if (m.method === "A") {
     extra = `<span>Homography inliers: <b>${m.h_inliers}</b> / ${m.h_good_matches}</span>`;
   } else if (m.method === "B") {
-    const di = m.detector_info || {};
-    extra = `<span>Detector: cols=${JSON.stringify(di.col_xs || [])} rows=${JSON.stringify(di.row_ys || [])}</span>`;
+    let detectedNote = `<span>Detected: <b>${m.detected_puzzle}</b> (${m.detected_h_inliers} inliers)</span>`;
+    if (m.is_wrong_puzzle) {
+      detectedNote += ` <span style="color:var(--warn);">— differs from selected (${m.selected_puzzle})</span>`;
+    }
+    extra = detectedNote;
   }
 
   let body = `
