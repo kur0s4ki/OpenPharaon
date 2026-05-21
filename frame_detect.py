@@ -1,309 +1,194 @@
 """
-Method B: Detect the 9 cube quadrilaterals directly in the photo,
-without any reference.
+Method B: Detect the 9 cube quadrilaterals directly in the photo using
+**local variance** as the primary signal.
 
-Strategy:
-  1. Grayscale + CLAHE for lighting normalization.
-  2. Adaptive threshold to isolate bright papyrus regions from the
-     dark wooden frame and varied wall background.
-  3. Find connected components, keep ones that are roughly square,
-     of similar size, and reasonably solid.
-  4. Cluster into a 3x3 grid by x/y centroid percentile binning.
-  5. Return 9 quads in row-major order (r0c0, r0c1, r0c2, r1c0, ...).
+Insight from probing the 6 puzzle photos:
+  - Cubes contain dark hieroglyphs/figures painted on a light papyrus
+    background. This produces high local variance everywhere inside.
+  - The wooden frame is uniformly dark — variance ~= 0.
+  - Walls (stone texture) have moderate variance.
+  - Painted figures on side walls and the tiger emblem also have high
+    variance, but they are isolated — they don't form a 3x3 grid.
 
-Returns None if the detector can't confidently find 9 cubes.
+Pipeline:
+  1. Compute local variance map (sliding-window E[X^2] - E[X]^2).
+  2. Otsu-threshold to extract high-variance regions.
+  3. Light morphology to clean up and connect cube interiors.
+  4. Find connected components, filter for "cube-shaped" (size + aspect).
+  5. Among all candidates, find the subset of 9 that best forms a 3x3 grid
+     (uniform spacing + similar sizes). The grid constraint rejects
+     isolated painted figures.
 """
 
 from __future__ import annotations
-
-from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
 
-@dataclass
-class Candidate:
-    x: int
-    y: int
-    w: int
-    h: int
-
-    @property
-    def area(self) -> int:
-        return self.w * self.h
-
-    @property
-    def cx(self) -> float:
-        return self.x + self.w / 2
-
-    @property
-    def cy(self) -> float:
-        return self.y + self.h / 2
-
-    @property
-    def quad(self) -> np.ndarray:
-        return np.array(
-            [[self.x, self.y], [self.x + self.w, self.y],
-             [self.x + self.w, self.y + self.h], [self.x, self.y + self.h]],
-            dtype=np.float32,
-        )
+def _local_variance(gray: np.ndarray, window: int = 15) -> np.ndarray:
+    g = gray.astype(np.float32)
+    mean = cv2.blur(g, (window, window))
+    sqr_mean = cv2.blur(g * g, (window, window))
+    var = sqr_mean - mean * mean
+    return np.clip(var, 0, var.max())
 
 
-def _filter_candidates(contours, img_area: int) -> list[Candidate]:
-    out: list[Candidate] = []
-    for c in contours:
-        x, y, w, h = cv2.boundingRect(c)
-        bbox_area = w * h
-        if bbox_area < img_area * 0.004 or bbox_area > img_area * 0.10:
-            continue
-        aspect = w / h if h else 0
-        if not (0.55 <= aspect <= 1.8):
-            continue
-        fill = cv2.contourArea(c) / bbox_area if bbox_area else 0
-        if fill < 0.55:
-            continue
-        out.append(Candidate(x, y, w, h))
-    return out
+def _grid_uniformity_score(boxes: list[tuple[int, int, int, int]]) -> tuple[float, list[tuple[int, int, int, int]] | None]:
+    """Pick the best 9-box subset that looks like a 3x3 grid.
 
-
-def _arrange_into_3x3(cands: list[Candidate]) -> list[Candidate] | None:
-    """Pick exactly 9 candidates forming a 3x3 grid by centroid clustering."""
-    if len(cands) < 9:
-        return None
-
-    # Trim to the largest ~20 candidates so outliers don't skew percentiles.
-    cands_sorted = sorted(cands, key=lambda c: -c.area)[:20]
-    cxs = np.array([c.cx for c in cands_sorted])
-    cys = np.array([c.cy for c in cands_sorted])
-
-    col_thr = np.percentile(cxs, [33.34, 66.67])
-    row_thr = np.percentile(cys, [33.34, 66.67])
-
-    grid: dict[tuple[int, int], Candidate] = {}
-    for cand in cands_sorted:
-        col = 0 if cand.cx < col_thr[0] else (1 if cand.cx < col_thr[1] else 2)
-        row = 0 if cand.cy < row_thr[0] else (1 if cand.cy < row_thr[1] else 2)
-        key = (row, col)
-        # If multiple candidates fall in the same cell, keep the largest.
-        if key not in grid or cand.area > grid[key].area:
-            grid[key] = cand
-
-    if len(grid) != 9:
-        return None
-    return [grid[(r, c)] for r in range(3) for c in range(3)]
-
-
-def _sanity_check(arranged: list[Candidate]) -> bool:
-    """Reject grids where sizes are wildly inconsistent (likely false positives)."""
-    areas = np.array([c.area for c in arranged], dtype=np.float64)
-    if areas.min() <= 0:
-        return False
-    spread = areas.max() / areas.min()
-    return spread <= 3.0  # cubes should be roughly the same physical size
-
-
-def _top_k_peaks(profile: np.ndarray, k: int, min_separation: int) -> list[tuple[int, float]]:
-    """Find up to k strongest peaks in a 1-D signal, each separated by at least
-    min_separation. Returns (position, strength) pairs sorted by position."""
-    if profile.size == 0:
-        return []
-    # Smooth a bit so a thick line counts as one peak
-    kernel = max(3, min_separation // 5)
-    if kernel % 2 == 0:
-        kernel += 1
-    smoothed = cv2.GaussianBlur(profile.astype(np.float32).reshape(-1, 1), (1, kernel), 0).flatten()
-
-    work = smoothed.copy()
-    peaks: list[tuple[int, float]] = []
-    for _ in range(k):
-        idx = int(np.argmax(work))
-        strength = float(work[idx])
-        if strength <= 0:
-            break
-        peaks.append((idx, strength))
-        lo = max(0, idx - min_separation)
-        hi = min(work.size, idx + min_separation + 1)
-        work[lo:hi] = 0
-    return sorted(peaks, key=lambda t: t[0])
-
-
-def _best_equispaced_4(peaks: list[tuple[int, float]], image_dim: int) -> list[int] | None:
-    """From a pool of candidate peaks, pick 4 that form the puzzle grid.
-
-    Score combines:
-      - strength_frac: total peak strength relative to all candidates
-      - equispacing: exp(-gap_cv * 4)
-      - size_match: Gaussian centred on gap = 0.20 * image_dim (cubes are
-        typically 18-22% of image height/width). This is the critical term
-        that rejects tightly-packed false grids on walls and over-wide
-        grids that span the entire image including background structure.
+    Returns (score in [0,1], 9 boxes in row-major order) or (0, None).
     """
-    from itertools import combinations
-    if len(peaks) < 4:
-        return None
+    if len(boxes) < 9:
+        return 0.0, None
 
-    best_score = -np.inf
-    best_combo: list[int] | None = None
-    total_strength = sum(s for _, s in peaks) + 1e-6
-    ideal_gap_ratio = 0.20  # cube takes ~20% of image dim
-    sigma = 0.07            # gaussian width — accepts roughly 13-27% range
+    # Sort by area descending and consider the top 18 candidates (helps when
+    # painted figures yield extra blobs).
+    boxes_sorted = sorted(boxes, key=lambda b: -b[2] * b[3])[:18]
+    if len(boxes_sorted) < 9:
+        return 0.0, None
 
-    for combo in combinations(peaks, 4):
-        positions = sorted(p for p, _ in combo)
-        strengths = [s for _, s in combo]
-        gaps = np.diff(positions)
-        if np.any(gaps <= 0):
+    # Centroids
+    cxs = np.array([b[0] + b[2] / 2 for b in boxes_sorted])
+    cys = np.array([b[1] + b[3] / 2 for b in boxes_sorted])
+
+    best_score = 0.0
+    best_arrangement: list[tuple[int, int, int, int]] | None = None
+
+    # Try clustering using each candidate's centroid as a row/col anchor.
+    # In practice the largest 9-15 candidates are mostly cubes, so percentile
+    # binning on the largest 9-15 yields a clean grid.
+    for try_n in (9, 12, 15, 18):
+        if try_n > len(boxes_sorted):
+            continue
+        subset = boxes_sorted[:try_n]
+        sxs = cxs[:try_n]
+        sys_ = cys[:try_n]
+        col_thr = np.percentile(sxs, [33.34, 66.67])
+        row_thr = np.percentile(sys_, [33.34, 66.67])
+
+        grid: dict[tuple[int, int], tuple[int, int, int, int]] = {}
+        for b, cx, cy in zip(subset, sxs, sys_):
+            c = 0 if cx < col_thr[0] else (1 if cx < col_thr[1] else 2)
+            r = 0 if cy < row_thr[0] else (1 if cy < row_thr[1] else 2)
+            # Keep the largest box per cell if there's a tie
+            if (r, c) not in grid or b[2] * b[3] > grid[(r, c)][2] * grid[(r, c)][3]:
+                grid[(r, c)] = b
+        if len(grid) != 9:
             continue
 
-        gap_mean = float(np.mean(gaps))
-        gap_cv = float(np.std(gaps) / max(gap_mean, 1e-6))
-        strength_frac = sum(strengths) / total_strength
+        # Score the arrangement
+        arranged = [grid[(r, c)] for r in range(3) for c in range(3)]
+        sizes = np.array([np.sqrt(b[2] * b[3]) for b in arranged])
+        size_cv = float(np.std(sizes) / max(np.mean(sizes), 1e-6))
+        size_score = float(np.exp(-size_cv * 4))
 
-        ratio = gap_mean / max(image_dim, 1)
-        size_match = float(np.exp(-((ratio - ideal_gap_ratio) / sigma) ** 2))
+        # Column-x and row-y uniformity
+        col_xs = np.array([np.mean([arranged[r * 3 + c][0] + arranged[r * 3 + c][2] / 2 for r in range(3)]) for c in range(3)])
+        row_ys = np.array([np.mean([arranged[r * 3 + c][1] + arranged[r * 3 + c][3] / 2 for c in range(3)]) for r in range(3)])
+        col_gaps = np.diff(col_xs)
+        row_gaps = np.diff(row_ys)
+        col_gap_cv = float(np.std(col_gaps) / max(np.mean(col_gaps), 1e-6))
+        row_gap_cv = float(np.std(row_gaps) / max(np.mean(row_gaps), 1e-6))
+        gap_score = float(np.exp(-(col_gap_cv + row_gap_cv) * 3))
 
-        score = strength_frac * float(np.exp(-gap_cv * 4)) * size_match
+        # Aspect ratio (cubes are roughly square)
+        aspects = np.array([b[2] / max(b[3], 1) for b in arranged])
+        aspect_score = float(np.exp(-np.mean(np.abs(aspects - 1.0)) * 3))
+
+        score = size_score * gap_score * aspect_score
         if score > best_score:
             best_score = score
-            best_combo = positions
+            best_arrangement = arranged
 
-    return best_combo
-
-
-def _joint_best_grid(
-    col_pool: list[tuple[int, float]],
-    row_pool: list[tuple[int, float]],
-    w: int, h: int,
-    edge_margin_frac: float = 0.04,
-) -> tuple[list[int], list[int]] | None:
-    """Pick (cols, rows) jointly using a cube-squareness prior.
-
-    Constraints baked into the score:
-      - cells must be in a plausible cube size range (10-30% of image dim)
-      - cube width ≈ cube height (Egyptian cubes are square)
-      - peaks should not sit on the image boundary (those are border artefacts)
-      - gaps within each axis should be uniform
-    """
-    from itertools import combinations
-    if len(col_pool) < 4 or len(row_pool) < 4:
-        return None
-
-    # Drop peaks too close to the image edges (image-boundary edge artefacts)
-    cm = int(w * edge_margin_frac)
-    rm = int(h * edge_margin_frac)
-    col_pool_f = [(p, s) for (p, s) in col_pool if cm <= p <= w - cm]
-    row_pool_f = [(p, s) for (p, s) in row_pool if rm <= p <= h - rm]
-    if len(col_pool_f) < 4 or len(row_pool_f) < 4:
-        return None
-
-    def axis_score(combo: tuple[tuple[int, float], ...]) -> tuple[float, list[int], float]:
-        """Return (strength_frac × uniformity, sorted positions, mean_gap)."""
-        positions = sorted(p for p, _ in combo)
-        gaps = np.diff(positions)
-        if np.any(gaps <= 0):
-            return -1.0, positions, 0.0
-        gap_mean = float(np.mean(gaps))
-        gap_cv = float(np.std(gaps) / max(gap_mean, 1e-6))
-        strength = sum(s for _, s in combo)
-        uniformity = float(np.exp(-gap_cv * 4))
-        return strength * uniformity, positions, gap_mean
-
-    # Pre-score axis candidates so we only iterate top scoring quartets.
-    col_combos = []
-    for combo in combinations(col_pool_f, 4):
-        sc, pos, gm = axis_score(combo)
-        if sc > 0:
-            col_combos.append((sc, pos, gm))
-    row_combos = []
-    for combo in combinations(row_pool_f, 4):
-        sc, pos, gm = axis_score(combo)
-        if sc > 0:
-            row_combos.append((sc, pos, gm))
-
-    col_combos.sort(key=lambda t: -t[0])
-    row_combos.sort(key=lambda t: -t[0])
-    col_combos = col_combos[:60]
-    row_combos = row_combos[:60]
-    if not col_combos or not row_combos:
-        return None
-
-    col_strength_total = sum(s for _, s in col_pool_f) + 1e-6
-    row_strength_total = sum(s for _, s in row_pool_f) + 1e-6
-
-    best_score = -np.inf
-    best: tuple[list[int], list[int]] | None = None
-    ideal_ratio = 0.20  # each cube ≈ 20% of image dimension
-    sigma = 0.07
-
-    for c_sc, c_pos, c_gm in col_combos:
-        c_size = float(np.exp(-((c_gm / w - ideal_ratio) / sigma) ** 2))
-        c_norm = c_sc / col_strength_total
-        for r_sc, r_pos, r_gm in row_combos:
-            r_size = float(np.exp(-((r_gm / h - ideal_ratio) / sigma) ** 2))
-            r_norm = r_sc / row_strength_total
-
-            # Cube-squareness: how close col-gap is to row-gap (in pixels).
-            squareness = float(np.exp(-((c_gm - r_gm) / max(c_gm, r_gm, 1)) ** 2 * 8))
-
-            score = c_norm * r_norm * c_size * r_size * squareness
-            if score > best_score:
-                best_score = score
-                best = (c_pos, r_pos)
-
-    return best
+    return best_score, best_arrangement
 
 
 def detect_cube_quads(photo: np.ndarray) -> tuple[list[np.ndarray] | None, dict]:
+    """Find the 9 cube quadrilaterals using:
+      - local mean (cube papyrus background is bright)
+      - local variance (cube has high-contrast hieroglyphs)
+    intersected. Wood pixels fail the brightness test; uniform walls fail
+    the variance test; painted figures are isolated and rejected by the
+    3x3 grid constraint.
     """
-    Find 9 cube quadrilaterals in the photo via projection-profile peak
-    detection + joint grid optimization with cube-squareness constraint.
-    """
-    info: dict = {"method": "frame_detect"}
+    info: dict = {"method": "frame_detect_variance"}
     h, w = photo.shape[:2]
+    img_area = h * w
 
     gray = cv2.cvtColor(photo, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    gray = clahe.apply(gray)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    g = gray.astype(np.float32)
 
-    sob_x = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3))
-    sob_y = np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3))
+    # Local mean + variance in a single pass
+    win = max(7, min(h, w) // 50)
+    if win % 2 == 0:
+        win += 1
+    local_mean = cv2.blur(g, (win, win))
+    local_sqr_mean = cv2.blur(g * g, (win, win))
+    local_var = np.clip(local_sqr_mean - local_mean * local_mean, 0, None)
+    var_norm = (local_var / max(local_var.max(), 1) * 255).astype(np.uint8)
 
-    vert_profile = sob_x.sum(axis=0)
-    horiz_profile = sob_y.sum(axis=1)
+    # Otsu the variance to split high vs low variance regions
+    _, var_mask = cv2.threshold(var_norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    info["var_otsu_thr"] = int(_)
 
-    min_sep_v = max(20, w // 12)
-    min_sep_h = max(20, h // 12)
+    # Brightness mask: cube background is bright; wood is dark.
+    # Use a fixed-ish floor (papyrus mean is V≈113-158) but with safety margin.
+    # Use Otsu on the gray to auto-pick a separator.
+    bright_thr, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # local_mean > bright_thr means "neighbourhood is light overall"
+    bright_mask = (local_mean > bright_thr).astype(np.uint8) * 255
+    info["bright_otsu_thr"] = int(bright_thr)
 
-    col_pool = _top_k_peaks(vert_profile, 12, min_sep_v)
-    row_pool = _top_k_peaks(horiz_profile, 12, min_sep_h)
-    info["col_candidates"] = len(col_pool)
-    info["row_candidates"] = len(row_pool)
+    # Combine: cube pixels are both bright (light papyrus background) AND
+    # high-variance (have hieroglyph content)
+    mask = cv2.bitwise_and(var_mask, bright_mask)
 
-    grid = _joint_best_grid(col_pool, row_pool, w, h)
-    if grid is None:
-        info["fail_reason"] = "could not find a self-consistent cube grid"
+    # Tiny close to bridge hieroglyph gaps but NOT divider gaps.
+    # Wooden dividers are typically 8-15 px; hieroglyph gaps are 1-3 px.
+    close_k = max(3, min(h, w) // 250)
+    if close_k % 2 == 0:
+        close_k += 1
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((close_k, close_k), np.uint8))
+
+    # Erode slightly to guarantee adjacent cubes don't connect through any
+    # remaining thin bridges
+    erode_k = max(3, close_k)
+    mask = cv2.erode(mask, np.ones((erode_k, erode_k), np.uint8), iterations=1)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Filter contours: keep cube-sized, square-ish, reasonably filled blobs
+    boxes: list[tuple[int, int, int, int]] = []
+    for c in contours:
+        x, y, ww, hh = cv2.boundingRect(c)
+        box_area = ww * hh
+        if box_area < img_area * 0.005 or box_area > img_area * 0.08:
+            continue
+        aspect = ww / max(hh, 1)
+        if not (0.5 <= aspect <= 2.0):
+            continue
+        fill = cv2.contourArea(c) / box_area
+        if fill < 0.30:
+            continue
+        boxes.append((x, y, ww, hh))
+
+    info["box_candidates"] = len(boxes)
+
+    score, arranged = _grid_uniformity_score(boxes)
+    info["grid_score"] = round(score, 3)
+
+    if arranged is None or score < 0.15:
+        info["fail_reason"] = (
+            f"could not arrange {len(boxes)} candidates into a 3x3 grid "
+            f"(best score {score:.2f})"
+        )
         return None, info
 
-    cols, rows = grid
-    info["col_xs"] = cols
-    info["row_ys"] = rows
-
-    quads: list[np.ndarray] = []
-    for r in range(3):
-        for c in range(3):
-            x1, x2 = cols[c], cols[c + 1]
-            y1, y2 = rows[r], rows[r + 1]
-            quads.append(np.array(
-                [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
-                dtype=np.float32,
-            ))
-
-    areas = np.array([(q[2, 0] - q[0, 0]) * (q[2, 1] - q[0, 1]) for q in quads])
-    if areas.min() <= 0 or areas.max() / areas.min() > 3.0:
-        info["fail_reason"] = "detected grid cells have inconsistent sizes"
-        return None, info
+    quads = [
+        np.array([[x, y], [x + ww, y], [x + ww, y + hh], [x, y + hh]], dtype=np.float32)
+        for (x, y, ww, hh) in arranged
+    ]
 
     info["ok"] = True
     return quads, info
