@@ -33,8 +33,12 @@ TESTS_DIR = ROOT / "tests"
 UPLOADS_DIR = ROOT / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
-ORB_INLIERS_MIN = 5          # per-slot match threshold (calibrated on 9 stress-test solved photos)
+ORB_INLIERS_MIN = 3          # per-slot match threshold; leaves margin above RANSAC noise
 H_INLIERS_MIN_RECOGNIZE = 8  # minimum homography inliers to claim "this is puzzle X"
+
+# Make every check deterministic: same photo always returns the same per-slot
+# scores, no run-to-run RANSAC variance.
+cv2.setRNGSeed(42)
 
 app = Flask(__name__)
 
@@ -261,6 +265,9 @@ def check():
 
     if photo is None:
         return jsonify(ok=False, error="failed to decode photo"), 400
+
+    # Re-seed OpenCV RNG before each request for deterministic RANSAC results.
+    cv2.setRNGSeed(42)
 
     # By default, only run Method A (the production path). Method B is a
     # diagnostic; users can opt in via methods=ab.
