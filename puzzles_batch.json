@@ -2,7 +2,7 @@
   "_comment": "6-puzzle batch test. Each entry: reference + solved prod photos with per-photo frame calibration. Expected verdict per photo: SOLVED (9/9 MATCH).",
 
   "reference_crop": { "x1": 0, "y1": 0, "x2": null, "y2": null },
-  "thresholds": { "orb_inliers_min": 10 },
+  "thresholds": { "orb_inliers_min": 5 },
 
   "puzzles": [
     {

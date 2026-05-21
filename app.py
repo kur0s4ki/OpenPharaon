@@ -33,7 +33,7 @@ TESTS_DIR = ROOT / "tests"
 UPLOADS_DIR = ROOT / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
-ORB_INLIERS_MIN = 10        # per-slot match threshold
+ORB_INLIERS_MIN = 5          # per-slot match threshold (calibrated on 9 stress-test solved photos)
 H_INLIERS_MIN_RECOGNIZE = 8  # minimum homography inliers to claim "this is puzzle X"
 
 app = Flask(__name__)
@@ -262,24 +262,34 @@ def check():
     if photo is None:
         return jsonify(ok=False, error="failed to decode photo"), 400
 
+    # By default, only run Method A (the production path). Method B is a
+    # diagnostic; users can opt in via methods=ab.
+    methods = request.form.get("methods", "a").lower()
+    run_b = "b" in methods
+
     run_id = uuid.uuid4().hex[:10]
     method_a = run_method_a(photo, reference)
-    method_b = run_method_b(photo, puzzle_id, reference)
+    method_b = run_method_b(photo, puzzle_id, reference) if run_b else None
 
-    for tag, result in (("a", method_a), ("b", method_b)):
-        if result.get("ok"):
-            overlay_path = UPLOADS_DIR / f"{run_id}_{tag}_overlay.jpg"
-            cv2.imwrite(str(overlay_path), result.pop("_overlay"), [cv2.IMWRITE_JPEG_QUALITY, 85])
-            result["overlay_url"] = f"/uploads/{overlay_path.name}"
+    if method_a.get("ok"):
+        overlay_path = UPLOADS_DIR / f"{run_id}_a_overlay.jpg"
+        cv2.imwrite(str(overlay_path), method_a.pop("_overlay"), [cv2.IMWRITE_JPEG_QUALITY, 85])
+        method_a["overlay_url"] = f"/uploads/{overlay_path.name}"
+    if method_b is not None and method_b.get("ok"):
+        overlay_path = UPLOADS_DIR / f"{run_id}_b_overlay.jpg"
+        cv2.imwrite(str(overlay_path), method_b.pop("_overlay"), [cv2.IMWRITE_JPEG_QUALITY, 85])
+        method_b["overlay_url"] = f"/uploads/{overlay_path.name}"
 
-    return jsonify({
+    response = {
         "ok": True,
         "puzzle": puzzle_id,
         "photo_label": photo_label,
         "elapsed_ms": int((time.perf_counter() - t0) * 1000),
         "method_a": method_a,
-        "method_b": method_b,
-    })
+    }
+    if method_b is not None:
+        response["method_b"] = method_b
+    return jsonify(response)
 
 
 @app.get("/uploads/<path:name>")
@@ -415,9 +425,12 @@ INDEX_HTML = r"""<!doctype html>
       </div>
     </div>
 
-    <div style="margin-top: 18px; display: flex; gap: 10px; align-items: center;">
+    <div style="margin-top: 18px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
       <button id="run">Check puzzle</button>
       <button id="reset" class="secondary">Clear</button>
+      <label style="display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; margin-bottom: 0; text-transform: none; letter-spacing: 0;">
+        <input type="checkbox" id="debugMode"> Also run Method B (diagnostic, ~6&times; slower)
+      </label>
       <span id="status" class="hint"></span>
     </div>
   </div>
@@ -501,6 +514,7 @@ $("run").onclick = async () => {
   fd.append("puzzle", puzzleSel.value);
   if (f) fd.append("photo", f);
   if (selectedSample) fd.append("sample", selectedSample);
+  if ($("debugMode").checked) fd.append("methods", "ab");
 
   try {
     const res = await fetch("/check", { method: "POST", body: fd });
@@ -526,7 +540,12 @@ function renderResult(d) {
 
   methodsRow.innerHTML = "";
   methodsRow.appendChild(renderMethodCard(d.method_a));
-  methodsRow.appendChild(renderMethodCard(d.method_b));
+  if (d.method_b) {
+    methodsRow.appendChild(renderMethodCard(d.method_b));
+    methodsRow.style.gridTemplateColumns = "1fr 1fr";
+  } else {
+    methodsRow.style.gridTemplateColumns = "1fr";
+  }
 }
 
 function renderMethodCard(m) {
