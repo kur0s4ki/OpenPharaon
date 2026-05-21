@@ -27,6 +27,7 @@ from homography_align import (
 )
 from pharaon_cv import orb_ransac_inliers, verdict_for
 from puzzles_batch_h import split_reference  # canonical splitter (rounded float)
+from frame_detect import detect_cube_quads
 
 ROOT = Path(__file__).parent
 TESTS_DIR = ROOT / "tests"
@@ -58,69 +59,106 @@ def discover_puzzles() -> list[dict]:
 
 # ---------- matcher pipeline ----------
 
-def run_match(photo: np.ndarray, reference: np.ndarray) -> dict:
-    """Full homography-aligned per-slot pipeline. Returns a result dict."""
-    H, h_inliers, h_good = find_homography(photo, reference)
-    if H is None:
-        return {
-            "ok": False,
-            "error": (
-                "Could not align the photo to the reference. Make sure the full puzzle "
-                "frame is visible, well-lit, and reasonably sharp."
-            ),
-            "h_inliers": 0,
-            "h_good_matches": h_good,
-        }
-
-    quads = project_cells(H, reference)
-    ref_cells = split_reference(reference)
-    photo_slots = [warp_quad(photo, q, out_size=256) for q in quads]
-
-    slot_results = []
+def _score_slots(photo_slots: list[np.ndarray], ref_cells: list[np.ndarray]) -> list[dict]:
+    """Run the per-slot ORB-RANSAC matcher and return verdict records."""
+    results = []
     for i, slot in enumerate(photo_slots):
         per_ref = [orb_ransac_inliers(slot, rc) for rc in ref_cells]
         best_idx = int(np.argmax(per_ref))
         verdict = verdict_for(
             per_ref[i], per_ref[best_idx], best_idx, i, {"orb_inliers_min": ORB_INLIERS_MIN}
         )
-        slot_results.append(
-            {
-                "row": i // 3,
-                "col": i % 3,
-                "expected_inliers": int(per_ref[i]),
-                "best_inliers": int(per_ref[best_idx]),
-                "best_match_index": best_idx,
-                "best_match_label": f"r{best_idx // 3}c{best_idx % 3}",
-                "verdict": verdict,
-            }
-        )
+        results.append({
+            "row": i // 3,
+            "col": i % 3,
+            "expected_inliers": int(per_ref[i]),
+            "best_inliers": int(per_ref[best_idx]),
+            "best_match_index": best_idx,
+            "best_match_label": f"r{best_idx // 3}c{best_idx % 3}",
+            "verdict": verdict,
+        })
+    return results
 
-    n_match = sum(1 for s in slot_results if s["verdict"] == "MATCH")
-    n_wrong = sum(1 for s in slot_results if s["verdict"] == "WRONG_FACE")
-    n_empty = sum(1 for s in slot_results if s["verdict"] == "EMPTY")
 
-    # Build labelled alignment overlay for the user to see.
+def _draw_verdict_overlay(photo: np.ndarray, quads, slot_results) -> np.ndarray:
     color_for = {"MATCH": (0, 200, 0), "WRONG_FACE": (0, 165, 255), "EMPTY": (60, 60, 220)}
-    overlay = photo.copy()
-    for i, (q, s) in enumerate(zip(quads, slot_results)):
+    out = photo.copy()
+    for q, s in zip(quads, slot_results):
         col = color_for.get(s["verdict"], (200, 200, 200))
         pts = q.astype(np.int32).reshape(-1, 1, 2)
-        cv2.polylines(overlay, [pts], True, col, 4)
+        cv2.polylines(out, [pts], True, col, 4)
         cx, cy = q.mean(axis=0).astype(int)
         label = f"r{s['row']}c{s['col']} {s['verdict']}"
         if s["verdict"] == "WRONG_FACE":
             label += f" -> {s['best_match_label']}"
-        cv2.putText(overlay, label, (cx - 70, cy + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, col, 2, cv2.LINE_AA)
+        cv2.putText(out, label, (cx - 70, cy + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, col, 2, cv2.LINE_AA)
+    return out
 
+
+def _summarise(slot_results: list[dict]) -> dict:
+    n_match = sum(1 for s in slot_results if s["verdict"] == "MATCH")
+    n_wrong = sum(1 for s in slot_results if s["verdict"] == "WRONG_FACE")
+    n_empty = sum(1 for s in slot_results if s["verdict"] == "EMPTY")
     return {
-        "ok": True,
-        "h_inliers": h_inliers,
-        "h_good_matches": h_good,
-        "slots": slot_results,
         "match_count": n_match,
         "wrong_face_count": n_wrong,
         "empty_count": n_empty,
         "verdict": "SOLVED" if n_match == 9 else "NOT_SOLVED",
+    }
+
+
+def run_method_a(photo: np.ndarray, reference: np.ndarray) -> dict:
+    """Method A: homography-based reference→photo alignment, then per-slot match."""
+    H, h_inliers, h_good = find_homography(photo, reference)
+    if H is None or h_inliers < 8:
+        return {
+            "ok": False,
+            "method": "A",
+            "name": "Homography (reference-aligned)",
+            "error": "Could not align photo to reference. Wrong puzzle or unclear photo.",
+            "h_inliers": h_inliers,
+            "h_good_matches": h_good,
+        }
+    quads = project_cells(H, reference)
+    ref_cells = split_reference(reference)
+    photo_slots = [warp_quad(photo, q, out_size=256) for q in quads]
+    slots = _score_slots(photo_slots, ref_cells)
+    overlay = _draw_verdict_overlay(photo, quads, slots)
+    return {
+        "ok": True,
+        "method": "A",
+        "name": "Homography (reference-aligned)",
+        "h_inliers": h_inliers,
+        "h_good_matches": h_good,
+        "slots": slots,
+        **_summarise(slots),
+        "_overlay": overlay,
+    }
+
+
+def run_method_b(photo: np.ndarray, reference: np.ndarray) -> dict:
+    """Method B: detect 9 cube quads directly in the photo (no reference needed
+    for localization), then match each cube against the reference's 9 cells."""
+    quads, info = detect_cube_quads(photo)
+    if quads is None:
+        return {
+            "ok": False,
+            "method": "B",
+            "name": "Frame detect (markerless grid)",
+            "error": f"Frame detection failed: {info.get('fail_reason', 'unknown')}",
+            "detector_info": info,
+        }
+    ref_cells = split_reference(reference)
+    photo_slots = [warp_quad(photo, q, out_size=256) for q in quads]
+    slots = _score_slots(photo_slots, ref_cells)
+    overlay = _draw_verdict_overlay(photo, quads, slots)
+    return {
+        "ok": True,
+        "method": "B",
+        "name": "Frame detect (markerless grid)",
+        "detector_info": info,
+        "slots": slots,
+        **_summarise(slots),
         "_overlay": overlay,
     }
 
@@ -165,19 +203,24 @@ def check():
     if photo is None:
         return jsonify(ok=False, error="failed to decode photo"), 400
 
-    result = run_match(photo, reference)
-    elapsed_ms = int((time.perf_counter() - t0) * 1000)
-    result["elapsed_ms"] = elapsed_ms
-    result["puzzle"] = puzzle_id
-    result["photo_label"] = photo_label
+    run_id = uuid.uuid4().hex[:10]
+    method_a = run_method_a(photo, reference)
+    method_b = run_method_b(photo, reference)
 
-    if result.get("ok"):
-        run_id = uuid.uuid4().hex[:10]
-        overlay_path = UPLOADS_DIR / f"{run_id}_overlay.jpg"
-        cv2.imwrite(str(overlay_path), result.pop("_overlay"), [cv2.IMWRITE_JPEG_QUALITY, 85])
-        result["overlay_url"] = f"/uploads/{overlay_path.name}"
+    for tag, result in (("a", method_a), ("b", method_b)):
+        if result.get("ok"):
+            overlay_path = UPLOADS_DIR / f"{run_id}_{tag}_overlay.jpg"
+            cv2.imwrite(str(overlay_path), result.pop("_overlay"), [cv2.IMWRITE_JPEG_QUALITY, 85])
+            result["overlay_url"] = f"/uploads/{overlay_path.name}"
 
-    return jsonify(result)
+    return jsonify({
+        "ok": True,
+        "puzzle": puzzle_id,
+        "photo_label": photo_label,
+        "elapsed_ms": int((time.perf_counter() - t0) * 1000),
+        "method_a": method_a,
+        "method_b": method_b,
+    })
 
 
 @app.get("/uploads/<path:name>")
@@ -275,6 +318,12 @@ INDEX_HTML = r"""<!doctype html>
     .overlay-wrap { margin-top: 12px; }
     .overlay-wrap img { max-width: 100%; border-radius: 8px; border: 1px solid var(--border); }
 
+    .methods-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 980px) { .methods-row { grid-template-columns: 1fr; } }
+    .method-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+    .method-card h3 { margin: 0 0 4px; color: var(--gold); font-size: 14px; letter-spacing: 0.5px; text-transform: uppercase; }
+    .method-card .sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+
     .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.2); border-top-color: var(--ink); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 8px; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .hidden { display: none !important; }
@@ -315,10 +364,8 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <div id="resultPanel" class="panel hidden">
-    <div id="verdict" class="verdict"></div>
-    <div id="stats" class="stats"></div>
-    <div id="overlayWrap" class="overlay-wrap"></div>
-    <div id="tableWrap"></div>
+    <div id="topStats" class="stats" style="margin-bottom: 12px;"></div>
+    <div id="methodsRow" class="methods-row"></div>
   </div>
 </div>
 
@@ -331,10 +378,8 @@ const refPreview = $("refPreview");
 const filePreview = $("filePreview");
 const statusEl = $("status");
 const resultPanel = $("resultPanel");
-const verdictEl = $("verdict");
-const statsEl = $("stats");
-const overlayWrap = $("overlayWrap");
-const tableWrap = $("tableWrap");
+const topStatsEl = $("topStats");
+const methodsRow = $("methodsRow");
 
 let selectedSample = null;
 
@@ -414,43 +459,69 @@ function renderResult(d) {
   resultPanel.classList.remove("hidden");
   if (!d.ok) { renderError(d.error || "Unknown error"); return; }
 
-  verdictEl.className = "verdict " + (d.verdict === "SOLVED" ? "solved" : "notsolved");
-  verdictEl.textContent = d.verdict;
-
-  statsEl.innerHTML = `
+  topStatsEl.innerHTML = `
     <span>Photo: <b>${d.photo_label}</b></span>
     <span>Puzzle: <b>${d.puzzle}</b></span>
-    <span>Match / Wrong / Empty: <b>${d.match_count} / ${d.wrong_face_count} / ${d.empty_count}</b></span>
-    <span>Homography inliers: <b>${d.h_inliers}</b> / ${d.h_good_matches}</span>
-    <span>Time: <b>${d.elapsed_ms} ms</b></span>
+    <span>Total time: <b>${d.elapsed_ms} ms</b></span>
   `;
 
-  overlayWrap.innerHTML = d.overlay_url
-    ? `<label>Alignment overlay</label><img src="${d.overlay_url}" alt="overlay">`
-    : "";
+  methodsRow.innerHTML = "";
+  methodsRow.appendChild(renderMethodCard(d.method_a));
+  methodsRow.appendChild(renderMethodCard(d.method_b));
+}
 
-  let html = `<table class="slots">
-    <thead><tr><th>Slot</th><th>Expected (own cell)</th><th>Best across all 9</th><th>Best matches</th><th>Verdict</th></tr></thead><tbody>`;
-  d.slots.forEach(s => {
+function renderMethodCard(m) {
+  const card = document.createElement("div");
+  card.className = "method-card";
+  let header = `<h3>Method ${m.method} — ${m.name}</h3>`;
+
+  if (!m.ok) {
+    card.innerHTML = header + `
+      <div class="verdict error" style="font-size:16px;margin-top:8px;">${m.error || "failed"}</div>
+    `;
+    return card;
+  }
+
+  const verdictCls = m.verdict === "SOLVED" ? "solved" : "notsolved";
+  let extra = "";
+  if (m.method === "A") {
+    extra = `<span>Homography inliers: <b>${m.h_inliers}</b> / ${m.h_good_matches}</span>`;
+  } else if (m.method === "B") {
+    const di = m.detector_info || {};
+    extra = `<span>Detector: cols=${JSON.stringify(di.col_xs || [])} rows=${JSON.stringify(di.row_ys || [])}</span>`;
+  }
+
+  let body = `
+    ${header}
+    <div class="verdict ${verdictCls}" style="font-size:20px;margin-bottom:8px;">${m.verdict}</div>
+    <div class="stats">
+      <span>Match / Wrong / Empty: <b>${m.match_count} / ${m.wrong_face_count} / ${m.empty_count}</b></span>
+      ${extra}
+    </div>`;
+
+  if (m.overlay_url) {
+    body += `<div class="overlay-wrap"><img src="${m.overlay_url}" alt="overlay"></div>`;
+  }
+
+  body += `<table class="slots"><thead><tr><th>Slot</th><th>Own</th><th>Best</th><th>Best @</th><th>Verdict</th></tr></thead><tbody>`;
+  m.slots.forEach(s => {
     const slot = `r${s.row}c${s.col}`;
-    html += `<tr>
+    body += `<tr>
       <td><b>${slot}</b></td>
       <td>${s.expected_inliers}</td>
       <td>${s.best_inliers}</td>
-      <td>${s.best_match_label}${s.verdict === "WRONG_FACE" ? " (belongs there)" : ""}</td>
+      <td>${s.best_match_label}</td>
       <td><span class="badge ${s.verdict}">${s.verdict}</span></td>
     </tr>`;
   });
-  html += "</tbody></table>";
-  tableWrap.innerHTML = html;
+  body += "</tbody></table>";
+  card.innerHTML = body;
+  return card;
 }
 
 function renderError(msg) {
-  verdictEl.className = "verdict error";
-  verdictEl.textContent = msg;
-  statsEl.innerHTML = "";
-  overlayWrap.innerHTML = "";
-  tableWrap.innerHTML = "";
+  topStatsEl.innerHTML = `<span class="verdict error" style="font-size:14px;">${msg}</span>`;
+  methodsRow.innerHTML = "";
 }
 </script>
 </body>
