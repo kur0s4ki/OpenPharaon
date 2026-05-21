@@ -187,18 +187,32 @@ def ncc_multiscale(slot: np.ndarray, ref_cell: np.ndarray) -> float:
 # ---------- verdict ----------
 
 def verdict_for(expected_inliers: int, best_inliers: int, best_idx: int, slot_idx: int, thr: dict) -> str:
-    """A slot is MATCH iff (a) its expected cell is the best match across all 9
-    reference cells AND (b) the score clears an absolute floor.
+    """Verdict for a single slot.
 
-    Otherwise:
-      - WRONG_FACE: confident match to a different reference cell (cube in wrong slot)
-      - EMPTY: no confident match anywhere (no cube / unrecognizable face)
+    Rules:
+      - MATCH:
+          * best_idx == slot_idx and expected >= floor (clear correct match), OR
+          * expected >= floor AND no other cell beats expected by a confident
+            margin (handles weak-signal ties — a slot tied at 4-vs-4 stays MATCH
+            instead of being mislabeled WRONG_FACE)
+      - WRONG_FACE: another cell clearly wins (best - expected > margin AND
+        best >= wrong_face_floor). Requires real signal, not noise-level ties.
+      - EMPTY: no confident match anywhere.
     """
     floor = thr["orb_inliers_min"]
-    if best_idx == slot_idx and expected_inliers >= floor:
-        return "MATCH"
-    if best_inliers >= floor:
+    wrong_face_floor = thr.get("wrong_face_min", 10)
+    wrong_face_margin = thr.get("wrong_face_margin", 5)
+
+    if best_idx != slot_idx and best_inliers > expected_inliers + wrong_face_margin and best_inliers >= wrong_face_floor:
         return "WRONG_FACE"
+
+    if expected_inliers >= floor:
+        return "MATCH"
+
+    if best_inliers >= wrong_face_floor:
+        # Strong signal somewhere but expected score too low → wrong face
+        return "WRONG_FACE"
+
     return "EMPTY"
 
 
