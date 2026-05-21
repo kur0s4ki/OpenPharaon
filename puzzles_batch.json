@@ -1,0 +1,59 @@
+{
+  "_comment": "6-puzzle batch test. Each entry: reference + solved prod photos with per-photo frame calibration. Expected verdict per photo: SOLVED (9/9 MATCH).",
+
+  "reference_crop": { "x1": 0, "y1": 0, "x2": null, "y2": null },
+  "thresholds": { "orb_inliers_min": 10 },
+
+  "puzzles": [
+    {
+      "name": "puzzle1",
+      "ref": "tests/puzzle 1/ref.png",
+      "photos": [
+        { "name": "p1_photo1", "photo": "tests/puzzle 1/1.png",
+          "frame": { "x1": 85, "y1": 140, "x2": 565, "y2": 820 }, "inner_margin_px": 16 },
+        { "name": "p1_photo2", "photo": "tests/puzzle 1/2.png",
+          "frame": { "x1": 160, "y1": 130, "x2": 655, "y2": 825 }, "inner_margin_px": 16 }
+      ]
+    },
+    {
+      "name": "puzzle2",
+      "ref": "tests/puzzle 2/ref.png",
+      "photos": [
+        { "name": "p2_photo1", "photo": "tests/puzzle 2/1.png",
+          "frame": { "x1": 160, "y1": 180, "x2": 635, "y2": 875 }, "inner_margin_px": 16 }
+      ]
+    },
+    {
+      "name": "puzzle3",
+      "ref": "tests/puzzle 3/ref.png",
+      "photos": [
+        { "name": "p3_photo1", "photo": "tests/puzzle 3/1.png",
+          "frame": { "x1": 185, "y1": 155, "x2": 660, "y2": 815 }, "inner_margin_px": 16 }
+      ]
+    },
+    {
+      "name": "puzzle4",
+      "ref": "tests/puzzle 4/ref.png",
+      "photos": [
+        { "name": "p4_photo1", "photo": "tests/puzzle 4/1.png",
+          "frame": { "x1": 140, "y1": 180, "x2": 655, "y2": 820 }, "inner_margin_px": 16 }
+      ]
+    },
+    {
+      "name": "puzzle5",
+      "ref": "tests/puzzle 5/ref.png",
+      "photos": [
+        { "name": "p5_photo1", "photo": "tests/puzzle 5/1.png",
+          "frame": { "x1": 180, "y1": 190, "x2": 670, "y2": 865 }, "inner_margin_px": 16 }
+      ]
+    },
+    {
+      "name": "puzzle6",
+      "ref": "tests/puzzle 6/ref.png",
+      "photos": [
+        { "name": "p6_photo1", "photo": "tests/puzzle 6/1.png",
+          "frame": { "x1": 170, "y1": 155, "x2": 655, "y2": 845 }, "inner_margin_px": 16 }
+      ]
+    }
+  ]
+}

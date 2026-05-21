@@ -1,0 +1,22 @@
+# Generated artifacts
+debug/
+uploads/
+scores.csv
+confusion.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.python-version
+
+# IDE / OS / tooling
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.omc/
+.claude/

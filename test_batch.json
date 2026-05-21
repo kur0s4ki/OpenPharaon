@@ -1,0 +1,46 @@
+{
+  "_comment": "Batch test config. Each entry references the standard reference (puzzle 1) and provides per-photo slot calibration.",
+
+  "reference_image": "reference-puzzle-1.png",
+  "reference_crop": { "x1": 0, "y1": 0, "x2": null, "y2": null },
+  "thresholds": { "orb_inliers_min": 10 },
+
+  "tests": [
+    {
+      "name": "01_different_puzzle_isis",
+      "photo": "test cases/photo_2026-05-01_18-07-33.jpg",
+      "expected": "NOT_SOLVED",
+      "frame": { "x1": 110, "y1": 250, "x2": 525, "y2": 620 },
+      "inner_margin_px": 14
+    },
+    {
+      "name": "02_scrambled_puzzle1",
+      "photo": "test cases/photo_2026-05-16_08-34-02.jpg",
+      "expected": "NOT_SOLVED",
+      "frame": { "x1": 75, "y1": 215, "x2": 580, "y2": 925 },
+      "inner_margin_px": 24
+    },
+    {
+      "name": "03_scrambled_puzzle1",
+      "photo": "test cases/photo_2026-05-16_08-39-24.jpg",
+      "expected": "NOT_SOLVED",
+      "frame": { "x1": 85, "y1": 225, "x2": 575, "y2": 930 },
+      "inner_margin_px": 24
+    },
+    {
+      "name": "04_different_puzzle_winged",
+      "photo": "test cases/photo_2026-05-16_09-03-12.jpg",
+      "expected": "NOT_SOLVED",
+      "frame": { "x1": 120, "y1": 385, "x2": 560, "y2": 740 },
+      "inner_margin_px": 14
+    },
+    {
+      "name": "05_scrambled_puzzle1_rows_swapped",
+      "photo": "test cases/photo_2026-05-17_09-42-44.jpg",
+      "expected": "NOT_SOLVED",
+      "_label_note": "Initially mislabeled as SOLVED — visual inspection shows top/middle rows swapped (figures on top, hieroglyphs in middle).",
+      "frame": { "x1": 180, "y1": 310, "x2": 770, "y2": 800 },
+      "inner_margin_px": 18
+    }
+  ]
+}
