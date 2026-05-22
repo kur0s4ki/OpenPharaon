@@ -396,13 +396,6 @@ INDEX_HTML = r"""<!doctype html>
 
     .preview { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
     .preview img { max-height: 140px; border-radius: 6px; border: 1px solid var(--border); }
-    .samples { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-    .sample-chip {
-      background: var(--panel-2); padding: 6px 10px; border-radius: 6px;
-      border: 1px solid var(--border); cursor: pointer; font-size: 13px;
-    }
-    .sample-chip:hover { border-color: var(--gold); }
-    .sample-chip.active { background: var(--gold); color: #1a1408; border-color: var(--gold); }
 
     .verdict {
       font-size: 28px; font-weight: 700; padding: 14px 18px; border-radius: 10px;
@@ -458,18 +451,12 @@ INDEX_HTML = r"""<!doctype html>
         <input type="file" id="photo" accept="image/*" capture="environment">
         <div class="hint">On mobile this opens the camera. On desktop it picks a file.</div>
         <div id="filePreview" class="preview"></div>
-
-        <label style="margin-top: 14px;">Or pick a bundled sample</label>
-        <div id="samples" class="samples"></div>
       </div>
     </div>
 
     <div style="margin-top: 18px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
       <button id="run">Check puzzle</button>
       <button id="reset" class="secondary">Clear</button>
-      <label style="display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; margin-bottom: 0; text-transform: none; letter-spacing: 0;">
-        <input type="checkbox" id="debugMode"> Also run Method B (diagnostic, ~6&times; slower)
-      </label>
       <span id="status" class="hint"></span>
     </div>
   </div>
@@ -484,7 +471,6 @@ INDEX_HTML = r"""<!doctype html>
 const $ = (id) => document.getElementById(id);
 const puzzleSel = $("puzzle");
 const photoInput = $("photo");
-const samplesDiv = $("samples");
 const refPreview = $("refPreview");
 const filePreview = $("filePreview");
 const statusEl = $("status");
@@ -492,35 +478,14 @@ const resultPanel = $("resultPanel");
 const topStatsEl = $("topStats");
 const methodsRow = $("methodsRow");
 
-let selectedSample = null;
-
 function refreshPuzzleUI() {
   const opt = puzzleSel.selectedOptions[0];
   const id = opt.value;
   refPreview.innerHTML = `<img src="/tests/${encodeURIComponent(id)}/${opt.dataset.ref}" alt="reference">`;
-  const samples = JSON.parse(opt.dataset.samples || "[]");
-  samplesDiv.innerHTML = "";
-  samples.forEach(s => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "sample-chip";
-    b.textContent = s;
-    b.onclick = () => {
-      photoInput.value = "";
-      filePreview.innerHTML = "";
-      selectedSample = s;
-      document.querySelectorAll(".sample-chip").forEach(el => el.classList.remove("active"));
-      b.classList.add("active");
-    };
-    samplesDiv.appendChild(b);
-  });
-  selectedSample = null;
 }
 
 photoInput.addEventListener("change", () => {
   filePreview.innerHTML = "";
-  document.querySelectorAll(".sample-chip").forEach(el => el.classList.remove("active"));
-  selectedSample = null;
   const f = photoInput.files[0];
   if (!f) return;
   const url = URL.createObjectURL(f);
@@ -533,16 +498,14 @@ refreshPuzzleUI();
 $("reset").onclick = () => {
   photoInput.value = "";
   filePreview.innerHTML = "";
-  selectedSample = null;
-  document.querySelectorAll(".sample-chip").forEach(el => el.classList.remove("active"));
   resultPanel.classList.add("hidden");
   statusEl.textContent = "";
 };
 
 $("run").onclick = async () => {
   const f = photoInput.files[0];
-  if (!f && !selectedSample) {
-    statusEl.textContent = "Pick a photo or a sample first.";
+  if (!f) {
+    statusEl.textContent = "Pick a photo first.";
     return;
   }
   statusEl.innerHTML = '<span class="spinner"></span>Running matcher…';
@@ -551,9 +514,7 @@ $("run").onclick = async () => {
 
   const fd = new FormData();
   fd.append("puzzle", puzzleSel.value);
-  if (f) fd.append("photo", f);
-  if (selectedSample) fd.append("sample", selectedSample);
-  if ($("debugMode").checked) fd.append("methods", "ab");
+  fd.append("photo", f);
 
   try {
     const res = await fetch("/check", { method: "POST", body: fd });
