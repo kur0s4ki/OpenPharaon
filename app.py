@@ -84,23 +84,47 @@ def discover_puzzles() -> list[dict]:
 
 # ---------- matcher pipeline ----------
 
+CLEAR_MATCH_FLOOR = 10  # per-slot inlier count above which a diagonal-best is considered "unambiguous"
+CLEAR_MATCH_COUNT_FOR_LENIENT = 6  # how many clear matches required to switch to lenient mode
+
+
 def _score_slots(photo_slots: list[np.ndarray], ref_cells: list[np.ndarray]) -> list[dict]:
-    """Run the per-slot ORB-RANSAC matcher and return verdict records."""
-    results = []
+    """Two-pass per-slot scoring.
+
+    Pass 1: compute raw per-slot scores (own + best across all 9 ref cells).
+    Determine "context_strong": how many slots have unambiguously correct
+    matches (own >= CLEAR_MATCH_FLOOR AND diagonal-best). If at least 6/9,
+    the puzzle is overall mostly solved, so verdict_for can apply its
+    lenient tied-off-diagonal rule. In a partially-scrambled scene this
+    count is low and the lenient rule stays OFF — preventing false MATCH
+    on cubes whose noise-level scores happen to tie an off-cell.
+    """
+    raw = []
     for i, slot in enumerate(photo_slots):
         per_ref = [orb_ransac_inliers(slot, rc) for rc in ref_cells]
         best_idx = int(np.argmax(per_ref))
-        verdict = verdict_for(
-            per_ref[i], per_ref[best_idx], best_idx, i, {"orb_inliers_min": ORB_INLIERS_MIN}
-        )
+        raw.append((i, int(per_ref[i]), int(per_ref[best_idx]), best_idx))
+
+    clear_matches = sum(1 for (i, exp, _b, bi) in raw if exp >= CLEAR_MATCH_FLOOR and bi == i)
+    context_strong = clear_matches >= CLEAR_MATCH_COUNT_FOR_LENIENT
+
+    thr = {
+        "orb_inliers_min": ORB_INLIERS_MIN,
+        "wrong_face_min": 10,
+        "wrong_face_margin": 5,
+    }
+
+    results = []
+    for (i, exp, best, bi) in raw:
+        v = verdict_for(exp, best, bi, i, thr, context_strong=context_strong)
         results.append({
             "row": i // 3,
             "col": i % 3,
-            "expected_inliers": int(per_ref[i]),
-            "best_inliers": int(per_ref[best_idx]),
-            "best_match_index": best_idx,
-            "best_match_label": f"r{best_idx // 3}c{best_idx % 3}",
-            "verdict": verdict,
+            "expected_inliers": exp,
+            "best_inliers": best,
+            "best_match_index": bi,
+            "best_match_label": f"r{bi // 3}c{bi % 3}",
+            "verdict": v,
         })
     return results
 
