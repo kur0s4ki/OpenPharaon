@@ -33,8 +33,12 @@ TESTS_DIR = ROOT / "tests"
 UPLOADS_DIR = ROOT / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
 
-ORB_INLIERS_MIN = 3          # per-slot match threshold; leaves margin above RANSAC noise
-H_INLIERS_MIN_RECOGNIZE = 8  # minimum homography inliers to claim "this is puzzle X"
+ORB_INLIERS_MIN = 3           # per-slot match threshold; leaves margin above RANSAC noise
+H_INLIERS_MIN_RECOGNIZE = 8   # method B: minimum inliers to claim "this is puzzle X"
+H_INLIERS_MIN_ALIGN = 30      # method A: minimum inliers for the projected quads to be trusted.
+                              # Below this, the homography is degenerate and projecting cells
+                              # produces nonsense quadrilaterals (zero-area, off-image, etc.).
+                              # Solved photos observed at 64-225, scrambled / wrong-puzzle at 5-14.
 
 # Make every check deterministic: same photo always returns the same per-slot
 # scores, no run-to-run RANSAC variance.
@@ -131,12 +135,16 @@ def _summarise(slot_results: list[dict]) -> dict:
 def run_method_a(photo: np.ndarray, reference: np.ndarray) -> dict:
     """Method A: homography-based reference→photo alignment, then per-slot match."""
     H, h_inliers, h_good = find_homography(photo, reference)
-    if H is None or h_inliers < 8:
+    if H is None or h_inliers < H_INLIERS_MIN_ALIGN:
         return {
             "ok": False,
             "method": "A",
             "name": "Homography (reference-aligned)",
-            "error": "Could not align photo to reference. Wrong puzzle or unclear photo.",
+            "error": (
+                f"Could not align photo to reference (only {h_inliers} homography inliers, "
+                f"need at least {H_INLIERS_MIN_ALIGN}). The cubes likely don't show this "
+                f"puzzle's content."
+            ),
             "h_inliers": h_inliers,
             "h_good_matches": h_good,
         }
