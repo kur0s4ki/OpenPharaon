@@ -11,13 +11,15 @@ Then open http://127.0.0.1:5000
 
 from __future__ import annotations
 
+import platform
+import threading
 import time
 import uuid
 from pathlib import Path
 
 import cv2
 import numpy as np
-from flask import Flask, abort, jsonify, render_template_string, request, send_from_directory
+from flask import Flask, Response, abort, jsonify, render_template_string, request, send_from_directory
 
 from homography_align import (
     draw_quads,
@@ -45,6 +47,115 @@ H_INLIERS_MIN_ALIGN = 30      # method A: minimum inliers for the projected quad
 cv2.setRNGSeed(42)
 
 app = Flask(__name__)
+
+
+# ---------- USB camera (Raspberry Pi target) ----------
+
+class Camera:
+    """Lazy-initialised USB camera wrapper.
+
+    Opens /dev/video0 on first use, runs a background capture thread that
+    keeps the latest frame in memory. Multiple HTTP requests share that
+    single capture loop (only one process can own a camera at a time).
+    """
+
+    def __init__(self, index: int = 0, width: int = 1280, height: int = 720, fps: int = 15):
+        self.index = index
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.cap: cv2.VideoCapture | None = None
+        self.frame: np.ndarray | None = None
+        self.lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+        self.running = False
+        self.error: str | None = None
+        self.read_failures = 0
+        self.read_successes = 0
+
+    def _try_open(self):
+        """Try multiple backends in order, return the first one that
+        successfully opens AND delivers a frame."""
+        # Platform-preferred backend first, then fall back to ANY.
+        system = platform.system().lower()
+        backends: list[tuple[int, str]] = []
+        if system == "windows":
+            backends = [(cv2.CAP_DSHOW, "DSHOW"), (cv2.CAP_MSMF, "MSMF"), (cv2.CAP_ANY, "ANY")]
+        elif system == "linux":
+            backends = [(cv2.CAP_V4L2, "V4L2"), (cv2.CAP_ANY, "ANY")]
+        else:
+            backends = [(cv2.CAP_ANY, "ANY")]
+
+        tried = []
+        for backend, name in backends:
+            cap = cv2.VideoCapture(self.index, backend)
+            if not cap.isOpened():
+                tried.append(f"{name}=not-open")
+                cap.release()
+                continue
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            cap.set(cv2.CAP_PROP_FPS, self.fps)
+            # Try reading a frame to confirm the backend actually delivers.
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                self.error = None
+                return cap, name
+            tried.append(f"{name}=no-frame")
+            cap.release()
+        self.error = "tried " + ", ".join(tried)
+        return None, None
+
+    def ensure_started(self) -> bool:
+        if self.running:
+            return True
+        with self.lock:
+            if self.running:
+                return True
+            cap, backend = self._try_open()
+            if cap is None:
+                return False
+            self.cap = cap
+            self.running = True
+            self.thread = threading.Thread(target=self._loop, daemon=True)
+            self.thread.start()
+            self.error = None
+            return True
+
+    def _loop(self) -> None:
+        while self.running:
+            ok, frame = self.cap.read()
+            if ok and frame is not None:
+                with self.lock:
+                    self.frame = frame
+                self.read_successes += 1
+            else:
+                self.read_failures += 1
+                time.sleep(0.02)
+
+    def latest(self) -> np.ndarray | None:
+        with self.lock:
+            return None if self.frame is None else self.frame.copy()
+
+
+CAMERA = Camera()
+
+
+def _mjpeg_stream():
+    """Yield JPEG-encoded frames in multipart/x-mixed-replace format."""
+    boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+    while True:
+        frame = CAMERA.latest()
+        if frame is None:
+            time.sleep(0.05)
+            continue
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok:
+            time.sleep(0.05)
+            continue
+        yield boundary + buf.tobytes() + b"\r\n"
+        time.sleep(0.066)  # ~15 fps cap
+
 
 # Cache all reference images on first access so we don't re-read from disk on every request.
 _REF_CACHE: dict[str, np.ndarray] = {}
@@ -265,47 +376,9 @@ def index():
     return render_template_string(INDEX_HTML, puzzles=discover_puzzles())
 
 
-@app.post("/check")
-def check():
-    t0 = time.perf_counter()
-    puzzle_id = request.form.get("puzzle", "").strip()
-    if not puzzle_id:
-        return jsonify(ok=False, error="puzzle is required"), 400
-
-    ref_path = TESTS_DIR / puzzle_id / "ref.png"
-    if not ref_path.exists():
-        return jsonify(ok=False, error=f"reference for '{puzzle_id}' not found"), 404
-    reference = cv2.imread(str(ref_path))
-    if reference is None:
-        return jsonify(ok=False, error="failed to read reference image"), 500
-
-    # Photo source: either uploaded file or a named sample from tests/
-    sample = request.form.get("sample", "").strip()
-    file = request.files.get("photo")
-    if file and file.filename:
-        photo_bytes = np.frombuffer(file.read(), np.uint8)
-        photo = cv2.imdecode(photo_bytes, cv2.IMREAD_COLOR)
-        photo_label = file.filename
-    elif sample:
-        sample_path = TESTS_DIR / puzzle_id / sample
-        if not sample_path.exists():
-            return jsonify(ok=False, error=f"sample '{sample}' not found"), 404
-        photo = cv2.imread(str(sample_path))
-        photo_label = sample
-    else:
-        return jsonify(ok=False, error="provide a photo file or sample name"), 400
-
-    if photo is None:
-        return jsonify(ok=False, error="failed to decode photo"), 400
-
-    # Re-seed OpenCV RNG before each request for deterministic RANSAC results.
+def _build_response(photo: np.ndarray, puzzle_id: str, reference: np.ndarray, photo_label: str, run_b: bool, t0: float) -> dict:
+    """Shared matcher pipeline used by /check (file upload) and /check-camera (live frame)."""
     cv2.setRNGSeed(42)
-
-    # By default, only run Method A (the production path). Method B is a
-    # diagnostic; users can opt in via methods=ab.
-    methods = request.form.get("methods", "a").lower()
-    run_b = "b" in methods
-
     run_id = uuid.uuid4().hex[:10]
     method_a = run_method_a(photo, reference)
     method_b = run_method_b(photo, puzzle_id, reference) if run_b else None
@@ -328,7 +401,89 @@ def check():
     }
     if method_b is not None:
         response["method_b"] = method_b
-    return jsonify(response)
+    return response
+
+
+def _load_reference(puzzle_id: str):
+    """Return (reference_ndarray, error_response_or_None)."""
+    if not puzzle_id:
+        return None, (jsonify(ok=False, error="puzzle is required"), 400)
+    ref_path = TESTS_DIR / puzzle_id / "ref.png"
+    if not ref_path.exists():
+        return None, (jsonify(ok=False, error=f"reference for '{puzzle_id}' not found"), 404)
+    reference = cv2.imread(str(ref_path))
+    if reference is None:
+        return None, (jsonify(ok=False, error="failed to read reference image"), 500)
+    return reference, None
+
+
+@app.post("/check")
+def check():
+    t0 = time.perf_counter()
+    puzzle_id = request.form.get("puzzle", "").strip()
+    reference, err = _load_reference(puzzle_id)
+    if err:
+        return err
+
+    # Photo source: either uploaded file or a named sample from tests/
+    sample = request.form.get("sample", "").strip()
+    file = request.files.get("photo")
+    if file and file.filename:
+        photo_bytes = np.frombuffer(file.read(), np.uint8)
+        photo = cv2.imdecode(photo_bytes, cv2.IMREAD_COLOR)
+        photo_label = file.filename
+    elif sample:
+        sample_path = TESTS_DIR / puzzle_id / sample
+        if not sample_path.exists():
+            return jsonify(ok=False, error=f"sample '{sample}' not found"), 404
+        photo = cv2.imread(str(sample_path))
+        photo_label = sample
+    else:
+        return jsonify(ok=False, error="provide a photo file or sample name"), 400
+
+    if photo is None:
+        return jsonify(ok=False, error="failed to decode photo"), 400
+
+    methods = request.form.get("methods", "a").lower()
+    run_b = "b" in methods
+    return jsonify(_build_response(photo, puzzle_id, reference, photo_label, run_b, t0))
+
+
+@app.get("/camera/status")
+def camera_status():
+    available = CAMERA.ensure_started()
+    return jsonify(
+        available=available,
+        error=CAMERA.error,
+        read_successes=CAMERA.read_successes,
+        read_failures=CAMERA.read_failures,
+    )
+
+
+@app.get("/stream")
+def stream():
+    if not CAMERA.ensure_started():
+        return Response(f"camera unavailable: {CAMERA.error}", status=503)
+    return Response(_mjpeg_stream(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.post("/check-camera")
+def check_camera():
+    t0 = time.perf_counter()
+    puzzle_id = request.form.get("puzzle", "").strip()
+    reference, err = _load_reference(puzzle_id)
+    if err:
+        return err
+
+    if not CAMERA.ensure_started():
+        return jsonify(ok=False, error=f"camera unavailable: {CAMERA.error}"), 503
+    photo = CAMERA.latest()
+    if photo is None:
+        return jsonify(ok=False, error="no frame from camera yet — try again in a moment"), 503
+
+    methods = request.form.get("methods", "a").lower()
+    run_b = "b" in methods
+    return jsonify(_build_response(photo, puzzle_id, reference, "live camera capture", run_b, t0))
 
 
 @app.get("/uploads/<path:name>")
@@ -429,6 +584,12 @@ INDEX_HTML = r"""<!doctype html>
     @keyframes spin { to { transform: rotate(360deg); } }
     .hidden { display: none !important; }
     .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+
+    .live-cam-wrap { position: relative; background: #000; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); max-width: 100%; }
+    .live-cam-wrap img { display: block; width: 100%; max-height: 360px; object-fit: contain; background: #000; }
+    .live-cam-wrap .dot { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.6); color: #fff; padding: 4px 10px; border-radius: 4px; font-size: 11px; letter-spacing: 0.4px; }
+    .live-cam-wrap .dot::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #e15252; margin-right: 6px; vertical-align: middle; animation: pulse 1.4s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
   </style>
 </head>
 <body>
@@ -455,9 +616,27 @@ INDEX_HTML = r"""<!doctype html>
     </div>
 
     <div style="margin-top: 18px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-      <button id="run">Check puzzle</button>
+      <button id="run">Check uploaded photo</button>
       <button id="reset" class="secondary">Clear</button>
       <span id="status" class="hint"></span>
+    </div>
+  </div>
+
+  <div class="panel" id="cameraPanel">
+    <label>Live USB camera</label>
+    <div id="cameraLoading" class="hint">Checking for connected camera…</div>
+    <div id="cameraUnavailable" class="hint hidden">
+      USB camera not detected. <span id="cameraError"></span> Use the upload above instead.
+    </div>
+    <div id="cameraView" class="hidden">
+      <div class="live-cam-wrap">
+        <img id="liveStream" alt="live camera feed">
+        <span class="dot">LIVE</span>
+      </div>
+      <div style="margin-top: 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+        <button id="captureBtn">Capture &amp; check</button>
+        <span id="cameraStatus" class="hint"></span>
+      </div>
     </div>
   </div>
 
@@ -501,6 +680,45 @@ $("reset").onclick = () => {
   resultPanel.classList.add("hidden");
   statusEl.textContent = "";
 };
+
+// ---------- Live camera ----------
+async function initCamera() {
+  try {
+    const res = await fetch("/camera/status");
+    const data = await res.json();
+    $("cameraLoading").classList.add("hidden");
+    if (data.available) {
+      $("cameraView").classList.remove("hidden");
+      $("liveStream").src = "/stream";
+    } else {
+      $("cameraUnavailable").classList.remove("hidden");
+      if (data.error) $("cameraError").textContent = "(" + data.error + ")";
+    }
+  } catch (e) {
+    $("cameraLoading").classList.add("hidden");
+    $("cameraUnavailable").classList.remove("hidden");
+    $("cameraError").textContent = "(" + e.message + ")";
+  }
+}
+initCamera();
+
+$("captureBtn") && ($("captureBtn").onclick = async () => {
+  $("cameraStatus").innerHTML = '<span class="spinner"></span>Capturing and matching…';
+  $("captureBtn").disabled = true;
+  resultPanel.classList.add("hidden");
+  try {
+    const fd = new FormData();
+    fd.append("puzzle", puzzleSel.value);
+    const res = await fetch("/check-camera", { method: "POST", body: fd });
+    const data = await res.json();
+    renderResult(data);
+  } catch (e) {
+    renderError("Network error: " + e.message);
+  } finally {
+    $("captureBtn").disabled = false;
+    $("cameraStatus").textContent = "";
+  }
+});
 
 $("run").onclick = async () => {
   const f = photoInput.files[0];
@@ -612,4 +830,6 @@ function renderError(msg) {
 
 if __name__ == "__main__":
     print(f"Discovered puzzles: {[p['id'] for p in discover_puzzles()]}")
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    # host=0.0.0.0 so the Pi-deployed UI is reachable from other devices on the LAN.
+    # threaded=True so MJPEG streaming on /stream doesn't block other requests.
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
