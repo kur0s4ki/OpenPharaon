@@ -1098,26 +1098,23 @@ LOCKED_HTML = r"""<!doctype html>
   <div class="header-hint">Camera is fixed. Draw 9 boxes <b>once</b> over the cube grid; every check after that crops those exact pixels — no homography, no auto-detection. <a href="/">← back to main</a></div>
 
   <div class="two-col">
-    <!-- LEFT: live preview + calibration -->
+    <!-- LEFT: calibration (camera-fixed, one-time, puzzle-agnostic) -->
     <div class="panel tight">
-      <div style="display:flex; gap:16px; align-items:flex-end; flex-wrap:wrap;">
-        <div style="flex:0 0 220px;">
-          <label for="puzzle">Puzzle</label>
-          <select id="puzzle">
-            {% for p in puzzles %}<option value="{{ p.id }}">{{ p.id }}</option>{% endfor %}
-          </select>
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+        <div>
+          <label style="margin:0">Calibration</label>
+          <div class="hint" style="margin-top:2px;">One-time. Same 9 ROIs apply to every puzzle.</div>
         </div>
-        <div class="controls" style="margin-top:0; flex:1;">
+        <div class="controls" style="margin-top:0;">
           <div class="toolbar-group">
             <button id="snapBtn">Snap & Calibrate</button>
             <button id="resumeBtn" class="secondary">Resume live</button>
             <button id="clearBtn" class="secondary">Clear</button>
             <button id="saveBtn" class="secondary" disabled>Save</button>
           </div>
-          <button id="checkBtn" style="margin-left:auto;">Check now (locked)</button>
         </div>
       </div>
-      <div class="hint" id="boxCounter">Boxes drawn: 0 / 9 — drag to draw, row-major (r0c0, r0c1, r0c2, r1c0, …)</div>
+      <div class="hint" id="boxCounter" style="margin-top:10px;">Boxes drawn: 0 / 9 — drag to draw, row-major (r0c0, r0c1, r0c2, r1c0, …)</div>
       <div class="hint" id="status"></div>
 
       <div class="canvas-wrap">
@@ -1126,9 +1123,21 @@ LOCKED_HTML = r"""<!doctype html>
       </div>
     </div>
 
-    <!-- RIGHT: result -->
+    <!-- RIGHT: test the saved calibration against a chosen puzzle -->
     <div id="resultPanel" class="panel tight">
-      <div id="verdict" class="verdict placeholder">No check yet</div>
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+        <div>
+          <label style="margin:0">Test</label>
+          <div class="hint" style="margin-top:2px;">Pick a puzzle and run a check using the saved calibration.</div>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <select id="puzzle" style="min-width:140px;">
+            {% for p in puzzles %}<option value="{{ p.id }}">{{ p.id }}</option>{% endfor %}
+          </select>
+          <button id="checkBtn">Check now</button>
+        </div>
+      </div>
+      <div id="verdict" class="verdict placeholder" style="margin-top:14px;">No check yet</div>
       <div id="stats" class="hint"></div>
       <div id="tableWrap" style="flex:1;"></div>
     </div>
