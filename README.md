@@ -1,63 +1,95 @@
-# OpenPharaon — Markerless CV Puzzle Solver
+# OpenPharaon — Locked-camera puzzle verifier
 
-Computer-vision detection of "is the 9-cube Pharaon puzzle solved?" using OpenCV only — no markers, no ML, no GPU. Designed to replace an RFID-based detection system that was suffering from card-fall reliability issues.
+Detects whether a 9-cube Egyptian Pharaon puzzle is solved using a fixed USB
+camera and OpenCV. Replaces an RFID-based detection that was unreliable due
+to cards falling inside the cubes.
 
-## What it does
+## How it works
 
-Given a reference image of a solved puzzle (papyrus painting) and a camera photo of the physical 9-cube board:
+The camera does not move. At install time, an operator draws 9 rectangles
+once over the cube grid in the live preview ("Snap & Calibrate" on `/`).
+Every check after that:
 
-1. **Auto-aligns** the photo to the reference via ORB feature matching + RANSAC homography (no manual slot calibration).
-2. **Projects** the 9 reference cell corners into the photo to get exact slot quadrilaterals.
-3. **Warps** each slot to a canonical square and matches it against the reference cell using ORB+RANSAC inliers.
-4. **Reports** per-slot verdict — `MATCH` (correct face in correct slot), `WRONG_FACE` (right face, wrong slot — gives a free hint system), or `EMPTY` (cube showing a face not in this puzzle).
+1. Grabs the latest camera frame.
+2. Crops the 9 saved pixel rectangles.
+3. Matches each crop against the selected puzzle's 9 reference cells using
+   ORB + RANSAC homography (USAC_FAST when available).
+4. Returns a per-slot verdict (`MATCH` / `WRONG_FACE` / `EMPTY`) and an
+   overall `SOLVED` / `NOT_SOLVED`.
 
-100% pass rate on 7 solved photos across 6 different puzzles at the time of writing.
-
-## Pipeline at a glance
-
-```
-photo ──┐
-        ├─► ORB+RANSAC ──► H (homography)
-ref  ───┘                    │
-                             ▼
-                   project 9 ref cell quads into photo
-                             │
-                             ▼
-                   warp each photo quad → 256×256 slot
-                             │
-                             ▼
-                   per-slot ORB-RANSAC vs all 9 ref cells
-                             │
-                             ▼
-                   verdict: MATCH | WRONG_FACE | EMPTY
-```
+No homography auto-alignment, no image-content guessing — the ROIs are
+fixed by the operator. If the operator hasn't calibrated yet, the page
+prompts for it and disables the check button.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `pharaon_cv.py` | Core ORB-RANSAC slot matcher + verdict logic |
-| `homography_align.py` | Reference→photo homography + slot projection |
-| `puzzles_batch_h.py` | Batch test runner using homography alignment (the production matcher) |
-| `puzzles_batch.json` | Test catalogue: (photo, reference) pairs |
-| `confusion.py` | Diagnostic: 9×9 photo-slot × ref-cell similarity matrix |
-| `tests/puzzle N/` | Reference + solved prod photos for each puzzle |
-| `debug/` | Auto-generated per-puzzle debug overlays (gitignored) |
+| `app.py` | Flask web app: UI + camera + calibration + check endpoint |
+| `pharaon_cv.py` | Core ORB + RANSAC primitives + verdict rules |
+| `tests/puzzle N/ref.png` | Reference image for each of the 6 puzzles |
+| `calibration.json` | 9 ROI boxes for this installation (gitignored) |
+| `uploads/` | Generated debug overlays per check (gitignored) |
 
-## Run the batch validator
+## Endpoints
 
-```bash
-python puzzles_batch_h.py
+| Method + path | Purpose |
+|---|---|
+| `GET /` | Single-page UI: live preview, calibration canvas, check panel |
+| `GET /stream` | MJPEG live camera feed |
+| `GET /snap` | Single still JPEG from the camera (used by the calibration canvas) |
+| `GET /camera/status` | JSON: availability, error, frame size, read counts |
+| `GET /calibration` | Load saved 9 boxes |
+| `POST /calibration` | Save 9 boxes from the UI |
+| `POST /check` | Capture latest frame, crop the 9 saved boxes, return verdict |
+
+## Run locally (Windows / dev)
+
+```powershell
+python -m pip install opencv-contrib-python numpy flask
+python app.py
 ```
 
-Expected output: `OVERALL: 7/7 photos passed`. Debug overlays land in `debug/puzzle_N/<photo>_alignment.png`.
+Open `http://127.0.0.1:5000`.
 
-## Requirements
+## Deploy on Raspberry Pi
 
-- Python 3.10+
-- `opencv-contrib-python` (`img_hash` module is used in some older diagnostic scripts)
-- `numpy`
+```bash
+sudo apt install -y git python3-pip python3-venv libatlas-base-dev libgl1
+git clone <repo>
+cd OpenPharaon
+python3 -m venv .venv --system-site-packages
+source .venv/bin/activate
+pip install --upgrade pip
+pip install 'flask>=2.3'
+sudo usermod -aG video $USER     # logout + login required
+python app.py
+```
 
-## Production target
+The systemd unit (suggested):
 
-Raspberry Pi 4 (CPU-only). Pure OpenCV — no model files, no GPU. Per-frame runtime: under 1 second on Pi 4.
+```ini
+[Unit]
+Description=OpenPharaon puzzle verifier
+After=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/OpenPharaon
+ExecStart=/home/pi/OpenPharaon/.venv/bin/python /home/pi/OpenPharaon/app.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Tunable thresholds
+
+In `app.py`:
+
+| Constant | Default | Meaning |
+|---|---|---|
+| `ORB_INLIERS_MIN` | `3` | Per-slot inlier floor for a MATCH to register |
+| `CLEAR_MATCH_FLOOR` | `10` | A slot at this many inliers (and diagonal-best) counts as "clearly correct" |
+| `CLEAR_MATCH_COUNT_FOR_LENIENT` | `6` | Need this many clear matches to enable the lenient tied-MATCH rule |

@@ -1,8 +1,10 @@
 # Generated artifacts
 debug/
 uploads/
-scores.csv
-confusion.csv
+
+# Per-installation calibration (the 9 ROI boxes for each Pi's camera).
+# Each deployment draws its own — must never be committed.
+calibration.json
 
 # Python
 __pycache__/
