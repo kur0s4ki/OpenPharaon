@@ -296,6 +296,11 @@ def index():
     return render_template_string(INDEX_HTML, puzzles=discover_puzzles())
 
 
+@app.get("/calibrate")
+def calibrate_page():
+    return render_template_string(CALIBRATE_HTML)
+
+
 @app.get("/stream")
 def stream():
     if not CAMERA.ensure_started():
@@ -437,11 +442,7 @@ def serve_test_asset(p: str):
 
 # ---------- HTML ----------
 
-INDEX_HTML = r"""<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OpenPharaon</title>
-<style>
+_SHARED_CSS = r"""
   :root {
     --bg:#14110d; --panel:#1f1b14; --panel-2:#2a241a;
     --ink:#f3e6c8; --muted:#a89671; --gold:#d8a84b;
@@ -450,91 +451,225 @@ INDEX_HTML = r"""<!doctype html>
   }
   * { box-sizing: border-box; }
   body { margin:0; padding:20px 28px; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
-  h1 { font-size:22px; color:var(--gold); margin:0 0 4px; }
-  .header-hint { color:var(--muted); font-size:13px; margin-bottom:16px; }
+  .topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:18px; }
+  h1 { font-size:22px; color:var(--gold); margin:0; }
+  .subtle-link { color:var(--muted); text-decoration:none; font-size:13px; padding:6px 12px; border:1px solid var(--border); border-radius:6px; }
+  .subtle-link:hover { color:var(--gold); border-color:var(--gold); }
   .wrap { max-width:1600px; margin:0 auto; }
   .panel { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:18px; }
   .panel.tight { display:flex; flex-direction:column; }
   label { display:block; font-size:11px; color:var(--muted); margin-bottom:6px; text-transform:uppercase; letter-spacing:0.6px; }
   select { background:var(--panel-2); color:var(--ink); border:1px solid var(--border); padding:9px 12px; border-radius:8px; font-size:14px; min-width:140px; }
-  button { background:var(--gold); color:#1a1408; border:0; border-radius:6px; padding:8px 14px; font-weight:600; font-size:13px; cursor:pointer; white-space:nowrap; }
+  button { background:var(--gold); color:#1a1408; border:0; border-radius:6px; padding:9px 16px; font-weight:600; font-size:14px; cursor:pointer; white-space:nowrap; }
   button.secondary { background:var(--panel-2); color:var(--ink); border:1px solid var(--border); }
   button:disabled { opacity:0.5; cursor:not-allowed; }
-  .canvas-wrap { position:relative; width:100%; margin-top:12px; border:1px solid var(--border); border-radius:8px; overflow:hidden; background:#000; flex:1; }
+  .canvas-wrap { position:relative; width:100%; border:1px solid var(--border); border-radius:8px; overflow:hidden; background:#000; flex:1; }
   .canvas-wrap img, .canvas-wrap canvas { display:block; width:100%; height:auto; }
-  .canvas-wrap canvas { position:absolute; top:0; left:0; cursor:crosshair; }
-  .two-col { display:grid; grid-template-columns:1.05fr 0.95fr; gap:16px; align-items:stretch; margin-bottom:16px; }
+  .canvas-wrap canvas { position:absolute; top:0; left:0; }
+  .canvas-wrap canvas.draw-mode { cursor:crosshair; }
+  .two-col { display:grid; grid-template-columns:1fr 1fr; gap:16px; align-items:stretch; margin-bottom:16px; }
   @media (max-width:1100px) { .two-col { grid-template-columns:1fr; } }
   .hint { color:var(--muted); font-size:12px; margin-top:8px; }
-  .verdict { font-size:24px; font-weight:700; padding:14px 18px; border-radius:10px; text-align:center; letter-spacing:0.8px; }
-  .verdict.solved { background:rgba(74,199,121,0.12); color:var(--ok); border:1px solid rgba(74,199,121,0.4); }
-  .verdict.notsolved { background:rgba(225,82,82,0.10); color:var(--bad); border:1px solid rgba(225,82,82,0.4); }
+  .verdict { font-size:28px; font-weight:700; padding:16px 20px; border-radius:10px; text-align:center; letter-spacing:1px; margin-bottom:12px; }
+  .verdict.solved { background:rgba(74,199,121,0.15); color:var(--ok); border:1px solid rgba(74,199,121,0.5); }
+  .verdict.notsolved { background:rgba(225,82,82,0.12); color:var(--bad); border:1px solid rgba(225,82,82,0.5); }
   .verdict.error { background:rgba(240,165,49,0.10); color:var(--warn); border:1px solid rgba(240,165,49,0.4); font-size:16px; line-height:1.5; }
-  .verdict.placeholder { background:var(--panel-2); color:var(--muted); border:1px dashed var(--border); font-size:16px; font-weight:500; letter-spacing:0; }
-  table { width:100%; border-collapse:collapse; margin-top:12px; font-size:13px; }
-  th, td { padding:7px 10px; border-bottom:1px solid var(--border); text-align:left; }
-  th { color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:0.4px; }
-  .badge { padding:2px 8px; border-radius:4px; font-size:11px; font-weight:700; }
-  .badge.MATCH { background:rgba(74,199,121,0.18); color:var(--ok); }
-  .badge.WRONG_FACE { background:rgba(240,165,49,0.18); color:var(--warn); }
-  .badge.EMPTY { background:rgba(225,82,82,0.10); color:var(--bad); }
+  .verdict.placeholder { background:var(--panel-2); color:var(--muted); border:1px dashed var(--border); font-size:18px; font-weight:500; letter-spacing:0.4px; }
   .toolbar-group { display:inline-flex; gap:6px; padding:4px; background:var(--panel-2); border:1px solid var(--border); border-radius:8px; }
-  .toolbar-group button { padding:6px 10px; font-size:12px; }
-  .overlay-row img { width:100%; border-radius:8px; border:1px solid var(--border); display:block; }
-</style>
+  .toolbar-group button { padding:7px 12px; font-size:13px; }
+  .ref-frame { width:100%; aspect-ratio:1/1; background:#000; border:1px solid var(--border); border-radius:8px; overflow:hidden; display:flex; align-items:center; justify-content:center; }
+  .ref-frame img { max-width:100%; max-height:100%; display:block; }
+"""
+
+
+INDEX_HTML = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenPharaon</title>
+<style>""" + _SHARED_CSS + r"""</style>
 </head><body>
 <div class="wrap">
-  <h1>OpenPharaon</h1>
-  <div class="header-hint">Locked-camera puzzle verifier. Calibrate the 9 cube ROIs once (camera is fixed); every check after that crops those exact pixels.</div>
+  <div class="topbar">
+    <h1>OpenPharaon</h1>
+    <a class="subtle-link" href="/calibrate">⚙ Calibrate</a>
+  </div>
 
-  <div class="two-col">
-    <!-- LEFT: calibration -->
-    <div class="panel tight">
-      <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
-        <div>
-          <label style="margin:0">Calibration</label>
-          <div class="hint" style="margin-top:2px;">One-time. Same 9 ROIs apply to every puzzle.</div>
-        </div>
-        <div class="toolbar-group">
-          <button id="snapBtn">Snap & Calibrate</button>
-          <button id="resumeBtn" class="secondary">Resume live</button>
-          <button id="clearBtn" class="secondary">Clear</button>
-          <button id="saveBtn" class="secondary" disabled>Save</button>
-        </div>
+  <div class="panel" style="margin-bottom:16px;">
+    <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap;">
+      <div>
+        <label for="puzzle">Puzzle</label>
+        <select id="puzzle">
+          {% for p in puzzles %}<option value="{{ p.id }}">{{ p.id }}</option>{% endfor %}
+        </select>
       </div>
-      <div class="hint" id="boxCounter" style="margin-top:10px;">Boxes drawn: 0 / 9 — drag to draw, row-major (r0c0, r0c1, r0c2, r1c0, …)</div>
-      <div class="hint" id="status"></div>
-
-      <div class="canvas-wrap">
-        <img id="bg" src="/stream" alt="camera">
-        <canvas id="overlay"></canvas>
-      </div>
-    </div>
-
-    <!-- RIGHT: test -->
-    <div id="resultPanel" class="panel tight">
-      <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
-        <div>
-          <label style="margin:0">Check</label>
-          <div class="hint" style="margin-top:2px;">Pick a puzzle and run a check using the saved calibration.</div>
-        </div>
-        <div style="display:flex; gap:8px; align-items:center;">
-          <select id="puzzle">
-            {% for p in puzzles %}<option value="{{ p.id }}">{{ p.id }}</option>{% endfor %}
-          </select>
-          <button id="checkBtn">Check now</button>
-        </div>
-      </div>
-      <div id="verdict" class="verdict placeholder" style="margin-top:14px;">No check yet</div>
-      <div id="stats" class="hint"></div>
-      <div id="tableWrap" style="flex:1;"></div>
+      <div style="flex:1;"></div>
+      <button id="checkBtn">Check now</button>
+      <button id="liveBtn" class="secondary" style="display:none;">Back to live preview</button>
+      <span id="status" class="hint" style="margin:0;"></span>
     </div>
   </div>
 
-  <div id="overlayRow" class="overlay-row" style="display:none;">
-    <div class="panel">
-      <label>Alignment overlay (latest check)</label>
-      <div id="overlayImg" style="margin-top:8px;"></div>
+  <div class="two-col">
+    <!-- LEFT: reference image for the chosen puzzle -->
+    <div class="panel tight">
+      <label>Reference (what a SOLVED puzzle looks like)</label>
+      <div class="ref-frame" id="refFrame">
+        <img id="refImg" alt="reference">
+      </div>
+    </div>
+
+    <!-- RIGHT: live cam feed (or analyzed photo after check) -->
+    <div class="panel tight">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <label id="rightLabel" style="margin:0;">Live camera (saved ROIs overlaid)</label>
+        <span id="elapsed" class="hint" style="margin:0;"></span>
+      </div>
+      <div id="verdict" class="verdict placeholder" style="margin-top:10px;">Ready — press Check now</div>
+      <div class="canvas-wrap" style="margin-top:0;">
+        <img id="feed" src="/stream" alt="feed">
+        <canvas id="overlay"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const feed = $("feed"), canvas = $("overlay"), ctx = canvas.getContext("2d");
+const refImg = $("refImg"), puzzleSel = $("puzzle"), statusEl = $("status");
+
+let savedBoxes = [];
+let imgNaturalSize = null;
+let liveMode = true;
+
+function refreshRef() {
+  refImg.src = "/tests/" + encodeURIComponent(puzzleSel.value) + "/ref.png";
+}
+puzzleSel.addEventListener("change", refreshRef);
+refreshRef();
+
+function drawSavedBoxes() {
+  if (!imgNaturalSize) return;
+  canvas.width = imgNaturalSize.w;
+  canvas.height = imgNaturalSize.h;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!liveMode || !savedBoxes || savedBoxes.length !== 9) return;
+  ctx.font = "bold 22px sans-serif";
+  savedBoxes.forEach((b, i) => {
+    ctx.strokeStyle = "#4ac779";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    const r = i / 3 | 0, c = i % 3;
+    ctx.fillRect(b.x1 + 4, b.y1 + 4, 70, 28);
+    ctx.fillStyle = "#4ac779";
+    ctx.fillText(`r${r}c${c}`, b.x1 + 8, b.y1 + 26);
+  });
+}
+
+feed.addEventListener("load", () => {
+  imgNaturalSize = { w: feed.naturalWidth, h: feed.naturalHeight };
+  drawSavedBoxes();
+});
+
+(async () => {
+  try {
+    const r = await fetch("/calibration");
+    const d = await r.json();
+    if (d.boxes && d.boxes.length === 9) {
+      savedBoxes = d.boxes;
+      drawSavedBoxes();
+    } else {
+      statusEl.innerHTML = 'No calibration yet — <a href="/calibrate" style="color:var(--gold)">click here to draw the 9 ROIs</a>.';
+    }
+  } catch (e) {}
+})();
+
+$("checkBtn").onclick = async () => {
+  $("checkBtn").disabled = true;
+  statusEl.textContent = "Capturing & matching…";
+  $("verdict").className = "verdict placeholder";
+  $("verdict").textContent = "Running…";
+  const fd = new FormData();
+  fd.append("puzzle", puzzleSel.value);
+  try {
+    const res = await fetch("/check", { method: "POST", body: fd });
+    const d = await res.json();
+    renderResult(d);
+  } catch (e) {
+    renderError("Network error: " + e.message);
+  } finally {
+    $("checkBtn").disabled = false;
+    statusEl.textContent = "";
+  }
+};
+
+$("liveBtn").onclick = () => {
+  liveMode = true;
+  feed.src = "/stream";
+  $("rightLabel").textContent = "Live camera (saved ROIs overlaid)";
+  $("verdict").className = "verdict placeholder";
+  $("verdict").textContent = "Ready — press Check now";
+  $("elapsed").textContent = "";
+  $("liveBtn").style.display = "none";
+  drawSavedBoxes();
+};
+
+function renderResult(d) {
+  const v = $("verdict");
+  if (!d.ok) { renderError(d.error || "error"); return; }
+  liveMode = false;
+  feed.src = d.overlay_url + "?ts=" + Date.now();
+  $("rightLabel").textContent = "Captured frame with per-slot result";
+  v.className = "verdict " + (d.verdict === "SOLVED" ? "solved" : "notsolved");
+  v.textContent = d.verdict;
+  $("elapsed").textContent = `${d.elapsed_ms} ms`;
+  $("liveBtn").style.display = "";
+  // hide the canvas overlay; the result image already has its own coloured quads
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function renderError(m) {
+  const v = $("verdict");
+  v.className = "verdict error"; v.textContent = m;
+  $("elapsed").textContent = "";
+}
+</script>
+</body></html>
+"""
+
+
+CALIBRATE_HTML = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenPharaon — Calibrate</title>
+<style>""" + _SHARED_CSS + r"""</style>
+</head><body>
+<div class="wrap">
+  <div class="topbar">
+    <h1>OpenPharaon — Calibrate</h1>
+    <a class="subtle-link" href="/">← back to check page</a>
+  </div>
+
+  <div class="panel">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+      <div>
+        <label style="margin:0">Draw the 9 cube ROIs</label>
+        <div class="hint" style="margin-top:2px;">Camera is locked. Same 9 boxes work for every puzzle.</div>
+      </div>
+      <div class="toolbar-group">
+        <button id="snapBtn">Snap & Calibrate</button>
+        <button id="resumeBtn" class="secondary">Resume live</button>
+        <button id="clearBtn" class="secondary">Clear</button>
+        <button id="saveBtn" class="secondary" disabled>Save</button>
+      </div>
+    </div>
+    <div class="hint" id="boxCounter" style="margin-top:10px;">Boxes drawn: 0 / 9 — drag to draw, row-major (r0c0, r0c1, r0c2, r1c0, …)</div>
+    <div class="hint" id="status"></div>
+
+    <div class="canvas-wrap" style="margin-top:12px;">
+      <img id="bg" src="/stream" alt="camera">
+      <canvas id="overlay" class="draw-mode"></canvas>
     </div>
   </div>
 </div>
@@ -553,7 +688,6 @@ function fitCanvasToImage() {
   canvas.height = imgNaturalSize.h;
   redraw();
 }
-
 bg.addEventListener("load", () => {
   imgNaturalSize = { w: bg.naturalWidth, h: bg.naturalHeight };
   fitCanvasToImage();
@@ -628,7 +762,6 @@ $("resumeBtn").onclick = () => {
   statusEl.textContent = "Live preview resumed.";
 };
 $("clearBtn").onclick = () => { boxes = []; redraw(); };
-
 $("saveBtn").onclick = async () => {
   if (boxes.length !== 9) return;
   statusEl.textContent = "Saving…";
@@ -639,62 +772,17 @@ $("saveBtn").onclick = async () => {
   });
   const data = await res.json();
   statusEl.textContent = data.ok
-    ? `Calibration saved (${data.saved_at}).`
+    ? `Calibration saved (${data.saved_at}). You can now return to the check page.`
     : "Save failed: " + (data.error || "unknown");
 };
 
-$("checkBtn").onclick = async () => {
-  $("checkBtn").disabled = true;
-  statusEl.textContent = "Capturing & matching…";
-  const fd = new FormData();
-  fd.append("puzzle", $("puzzle").value);
-  try {
-    const res = await fetch("/check", { method: "POST", body: fd });
-    renderResult(await res.json());
-  } catch (e) {
-    renderError("Network error: " + e.message);
-  } finally {
-    $("checkBtn").disabled = false;
-    statusEl.textContent = "";
-  }
-};
-
-function renderResult(d) {
-  const v = $("verdict");
-  if (!d.ok) {
-    v.className = "verdict error"; v.textContent = d.error || "error";
-    $("stats").textContent = ""; $("tableWrap").innerHTML = "";
-    $("overlayRow").style.display = "none";
-    return;
-  }
-  v.className = "verdict " + (d.verdict === "SOLVED" ? "solved" : "notsolved");
-  v.textContent = d.verdict;
-  $("stats").textContent = `Match ${d.match_count} / Wrong ${d.wrong_face_count} / Empty ${d.empty_count}   |   ${d.elapsed_ms} ms`;
-  let html = '<table><thead><tr><th>Slot</th><th>Own</th><th>Best</th><th>Best @</th><th>Verdict</th></tr></thead><tbody>';
-  d.slots.forEach(s => {
-    html += `<tr><td><b>r${s.row}c${s.col}</b></td><td>${s.expected_inliers}</td><td>${s.best_inliers}</td><td>${s.best_match_label}</td><td><span class="badge ${s.verdict}">${s.verdict}</span></td></tr>`;
-  });
-  html += '</tbody></table>';
-  $("tableWrap").innerHTML = html;
-  if (d.overlay_url) {
-    $("overlayImg").innerHTML = `<img src="${d.overlay_url}" alt="overlay">`;
-    $("overlayRow").style.display = "";
-  }
-}
-function renderError(m) {
-  const v=$("verdict"); v.className="verdict error"; v.textContent=m;
-  $("stats").textContent=""; $("tableWrap").innerHTML="";
-  $("overlayRow").style.display="none";
-}
-
-// Load existing calibration on page open
 (async () => {
   try {
     const r = await fetch("/calibration");
     const d = await r.json();
     if (d.boxes && d.boxes.length === 9) {
       boxes = d.boxes;
-      statusEl.textContent = "Loaded saved calibration (" + (d.saved_at || "") + "). The 9 ROIs are always drawn over the live feed.";
+      statusEl.textContent = "Loaded saved calibration (" + (d.saved_at || "") + "). Drag-draw will replace them.";
       if (imgNaturalSize) redraw();
     } else {
       statusEl.textContent = "No calibration yet. Click Snap & Calibrate to draw 9 ROIs.";
