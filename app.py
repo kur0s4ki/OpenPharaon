@@ -1054,56 +1054,70 @@ LOCKED_HTML = r"""<!doctype html>
     --border: #3a3122;
   }
   * { box-sizing: border-box; }
-  body { margin:0; padding:24px; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
-  h1 { font-size:22px; color:var(--gold); margin:0 0 12px; }
-  .wrap { max-width:1080px; margin:0 auto; }
-  .panel { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:18px; margin-bottom:16px; }
-  label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; text-transform:uppercase; letter-spacing:0.6px; }
-  select { background:var(--panel-2); color:var(--ink); border:1px solid var(--border); padding:10px 12px; border-radius:8px; width:100%; max-width:300px; }
-  button { background:var(--gold); color:#1a1408; border:0; border-radius:8px; padding:10px 16px; font-weight:600; cursor:pointer; margin-right:8px; }
+  body { margin:0; padding:20px 28px; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  h1 { font-size:22px; color:var(--gold); margin:0 0 4px; }
+  .header-hint { color:var(--muted); font-size:13px; margin-bottom:16px; }
+  .wrap { max-width: 1600px; margin:0 auto; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:18px; }
+  label { display:block; font-size:11px; color:var(--muted); margin-bottom:6px; text-transform:uppercase; letter-spacing:0.6px; }
+  select { background:var(--panel-2); color:var(--ink); border:1px solid var(--border); padding:9px 12px; border-radius:8px; width:100%; max-width:300px; font-size:14px; }
+  button { background:var(--gold); color:#1a1408; border:0; border-radius:6px; padding:8px 14px; font-weight:600; font-size:13px; cursor:pointer; white-space:nowrap; }
   button.secondary { background:var(--panel-2); color:var(--ink); border:1px solid var(--border); }
   button:disabled { opacity:0.5; cursor:not-allowed; }
-  .canvas-wrap { position:relative; max-width:100%; margin-top:12px; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
-  .canvas-wrap img, .canvas-wrap canvas { display:block; max-width:100%; width:100%; height:auto; }
+  .canvas-wrap { position:relative; width:100%; margin-top:12px; border:1px solid var(--border); border-radius:8px; overflow:hidden; background:#000; }
+  .canvas-wrap img, .canvas-wrap canvas { display:block; width:100%; height:auto; }
   .canvas-wrap canvas { position:absolute; top:0; left:0; cursor:crosshair; }
-  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  .two-col { display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 16px; align-items: stretch; margin-bottom: 16px; }
   @media (max-width: 1100px) { .two-col { grid-template-columns: 1fr; } }
-  .hint { color:var(--muted); font-size:13px; margin-top:8px; }
-  .verdict { font-size:22px; font-weight:700; padding:12px 16px; border-radius:10px; text-align:center; letter-spacing:0.6px; margin-top:12px; }
+  .panel.tight { display: flex; flex-direction: column; }
+  .panel.tight .canvas-wrap { flex: 1; }
+  .hint { color:var(--muted); font-size:12px; margin-top:8px; }
+  .verdict { font-size:24px; font-weight:700; padding:14px 18px; border-radius:10px; text-align:center; letter-spacing:0.8px; }
   .verdict.solved { background:rgba(74,199,121,0.12); color:var(--ok); border:1px solid rgba(74,199,121,0.4); }
   .verdict.notsolved { background:rgba(225,82,82,0.10); color:var(--bad); border:1px solid rgba(225,82,82,0.4); }
-  .verdict.error { background:rgba(240,165,49,0.10); color:var(--warn); border:1px solid rgba(240,165,49,0.4); font-size:16px; }
-  table { width:100%; border-collapse:collapse; margin-top:10px; font-size:13px; }
-  th, td { padding:6px 10px; border-bottom:1px solid var(--border); text-align:left; }
-  th { color:var(--muted); text-transform:uppercase; font-size:11px; }
-  .badge { padding:2px 8px; border-radius:4px; font-size:11px; font-weight:700; }
+  .verdict.error { background:rgba(240,165,49,0.10); color:var(--warn); border:1px solid rgba(240,165,49,0.4); font-size:16px; line-height:1.5; }
+  .verdict.placeholder { background: var(--panel-2); color: var(--muted); border:1px dashed var(--border); font-size:16px; font-weight:500; letter-spacing:0; }
+  table { width:100%; border-collapse:collapse; margin-top:12px; font-size:13px; }
+  th, td { padding:7px 10px; border-bottom:1px solid var(--border); text-align:left; }
+  th { color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:0.4px; }
+  .badge { padding:2px 8px; border-radius:4px; font-size:11px; font-weight:700; letter-spacing:0.3px; }
   .badge.MATCH { background:rgba(74,199,121,0.18); color:var(--ok); }
   .badge.WRONG_FACE { background:rgba(240,165,49,0.18); color:var(--warn); }
   .badge.EMPTY { background:rgba(225,82,82,0.10); color:var(--bad); }
-  .row { display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap; }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; align-items:center; }
+  .toolbar-group { display:flex; gap:6px; padding:4px; background:var(--panel-2); border:1px solid var(--border); border-radius:8px; }
+  .toolbar-group button { padding:6px 10px; font-size:12px; }
   a { color:var(--gold); }
+  .overlay-row { margin-top:0; }
+  .overlay-row img { width:100%; border-radius:8px; border:1px solid var(--border); display:block; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Locked-ROI mode (install-time calibration)</h1>
-  <div class="hint">Camera is fixed. Draw 9 boxes <b>once</b> over the cube grid; every check after that crops those exact pixels — no homography, no auto-detection. <a href="/">← back to main</a></div>
+  <div class="header-hint">Camera is fixed. Draw 9 boxes <b>once</b> over the cube grid; every check after that crops those exact pixels — no homography, no auto-detection. <a href="/">← back to main</a></div>
 
   <div class="two-col">
-    <div class="panel">
-      <label for="puzzle">Puzzle</label>
-      <select id="puzzle">
-        {% for p in puzzles %}<option value="{{ p.id }}">{{ p.id }}</option>{% endfor %}
-      </select>
-
-      <div class="row">
-        <button id="snapBtn">Snap & Calibrate</button>
-        <button id="resumeBtn" class="secondary">Resume live</button>
-        <button id="clearBtn" class="secondary">Clear boxes</button>
-        <button id="saveBtn" class="secondary" disabled>Save calibration</button>
-        <button id="checkBtn">Check now (locked)</button>
+    <!-- LEFT: live preview + calibration -->
+    <div class="panel tight">
+      <div style="display:flex; gap:16px; align-items:flex-end; flex-wrap:wrap;">
+        <div style="flex:0 0 220px;">
+          <label for="puzzle">Puzzle</label>
+          <select id="puzzle">
+            {% for p in puzzles %}<option value="{{ p.id }}">{{ p.id }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="controls" style="margin-top:0; flex:1;">
+          <div class="toolbar-group">
+            <button id="snapBtn">Snap & Calibrate</button>
+            <button id="resumeBtn" class="secondary">Resume live</button>
+            <button id="clearBtn" class="secondary">Clear</button>
+            <button id="saveBtn" class="secondary" disabled>Save</button>
+          </div>
+          <button id="checkBtn" style="margin-left:auto;">Check now (locked)</button>
+        </div>
       </div>
-      <div class="hint" id="boxCounter">Boxes drawn: 0 / 9 — drag to draw, row-major order (r0c0, r0c1, r0c2, r1c0, …)</div>
+      <div class="hint" id="boxCounter">Boxes drawn: 0 / 9 — drag to draw, row-major (r0c0, r0c1, r0c2, r1c0, …)</div>
       <div class="hint" id="status"></div>
 
       <div class="canvas-wrap">
@@ -1112,10 +1126,19 @@ LOCKED_HTML = r"""<!doctype html>
       </div>
     </div>
 
-    <div id="resultPanel" class="panel" style="opacity:0.4; min-height: 200px;">
-      <div id="verdict" class="verdict" style="background: var(--panel-2); color: var(--muted); border-color: var(--border);">No check yet</div>
-      <div id="stats" class="hint" style="margin-top:8px"></div>
-      <div id="tableWrap"></div>
+    <!-- RIGHT: result -->
+    <div id="resultPanel" class="panel tight">
+      <div id="verdict" class="verdict placeholder">No check yet</div>
+      <div id="stats" class="hint"></div>
+      <div id="tableWrap" style="flex:1;"></div>
+    </div>
+  </div>
+
+  <!-- BOTTOM: alignment overlay at full width -->
+  <div id="overlayRow" class="overlay-row" style="display:none;">
+    <div class="panel">
+      <label>Alignment overlay (latest check)</label>
+      <div id="overlayImg" style="margin-top:8px;"></div>
     </div>
   </div>
 </div>
@@ -1251,22 +1274,34 @@ $("checkBtn").onclick = async () => {
 };
 
 function renderResult(d) {
-  $("resultPanel").style.opacity = "1";
   const v = $("verdict");
-  if (!d.ok) { v.className = "verdict error"; v.textContent = d.error || "error"; v.style = ""; $("stats").textContent = ""; $("tableWrap").innerHTML = ""; return; }
+  if (!d.ok) {
+    v.className = "verdict error"; v.textContent = d.error || "error";
+    $("stats").textContent = ""; $("tableWrap").innerHTML = "";
+    $("overlayRow").style.display = "none";
+    return;
+  }
   v.className = "verdict " + (d.verdict === "SOLVED" ? "solved" : "notsolved");
   v.textContent = d.verdict;
-  v.style = "";
   $("stats").textContent = `Match ${d.match_count} / Wrong ${d.wrong_face_count} / Empty ${d.empty_count}   |   ${d.elapsed_ms} ms`;
   let html = '<table><thead><tr><th>Slot</th><th>Own</th><th>Best</th><th>Best @</th><th>Verdict</th></tr></thead><tbody>';
   d.slots.forEach(s => {
     html += `<tr><td><b>r${s.row}c${s.col}</b></td><td>${s.expected_inliers}</td><td>${s.best_inliers}</td><td>${s.best_match_label}</td><td><span class="badge ${s.verdict}">${s.verdict}</span></td></tr>`;
   });
   html += '</tbody></table>';
-  if (d.overlay_url) html += `<div style="margin-top:12px"><img src="${d.overlay_url}" style="max-width:100%; border-radius:8px"></div>`;
   $("tableWrap").innerHTML = html;
+  if (d.overlay_url) {
+    $("overlayImg").innerHTML = `<img src="${d.overlay_url}" alt="overlay">`;
+    $("overlayRow").style.display = "";
+  } else {
+    $("overlayRow").style.display = "none";
+  }
 }
-function renderError(m) { $("resultPanel").style.opacity = "1"; const v=$("verdict"); v.className="verdict error"; v.textContent=m; v.style = ""; $("stats").textContent=""; $("tableWrap").innerHTML=""; }
+function renderError(m) {
+  const v=$("verdict"); v.className="verdict error"; v.textContent=m;
+  $("stats").textContent=""; $("tableWrap").innerHTML="";
+  $("overlayRow").style.display = "none";
+}
 
 // Load existing calibration on page load
 (async () => {
