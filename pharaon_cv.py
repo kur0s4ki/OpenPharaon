@@ -110,18 +110,23 @@ def orb_good_matches(a: np.ndarray, b: np.ndarray, n_features: int = 2000) -> in
     return good
 
 
-def orb_ransac_inliers(a: np.ndarray, b: np.ndarray, n_features: int = 2000) -> int:
-    """Count RANSAC inliers under a consistent homography.
+def precompute_orb(img: np.ndarray, n_features: int = 1000, size: int = 256):
+    """Preprocess `img` and run ORB. Returns (keypoints, descriptors).
 
-    Stronger than raw match count: requires matches to fit one geometric
-    transformation. Repeated-pattern false positives (e.g. similar hieroglyphs
-    in different positions) typically don't survive RANSAC.
+    Designed to be cached: call once on each reference cell at startup,
+    re-use across many photo-slot matchings.
     """
-    ga = _preprocess(a)
-    gb = _preprocess(b)
+    g = _preprocess(img, size=size)
     orb = cv2.ORB_create(nfeatures=n_features, scaleFactor=1.2, nlevels=8)
-    ka, da = orb.detectAndCompute(ga, None)
-    kb, db = orb.detectAndCompute(gb, None)
+    return orb.detectAndCompute(g, None)
+
+
+def ransac_inliers_from_descriptors(ka, da, kb, db) -> int:
+    """Count RANSAC inliers given already-computed ORB keypoints+descriptors.
+
+    Hot path on Pi: skips the preprocess+ORB step that dominates runtime,
+    so callers can amortize feature extraction across many comparisons.
+    """
     if da is None or db is None or len(ka) < 4 or len(kb) < 4:
         return 0
     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
@@ -141,6 +146,14 @@ def orb_ransac_inliers(a: np.ndarray, b: np.ndarray, n_features: int = 2000) -> 
     if mask is None:
         return 0
     return int(mask.sum())
+
+
+def orb_ransac_inliers(a: np.ndarray, b: np.ndarray, n_features: int = 1000) -> int:
+    """Convenience: compute features for both sides then call RANSAC matcher.
+    Slow path — kept for callers that don't have a cached side."""
+    ka, da = precompute_orb(a, n_features=n_features)
+    kb, db = precompute_orb(b, n_features=n_features)
+    return ransac_inliers_from_descriptors(ka, da, kb, db)
 
 
 def phash_distance(a: np.ndarray, b: np.ndarray) -> int:

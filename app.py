@@ -27,7 +27,7 @@ from homography_align import (
     project_cells,
     warp_quad,
 )
-from pharaon_cv import orb_ransac_inliers, verdict_for
+from pharaon_cv import orb_ransac_inliers, precompute_orb, ransac_inliers_from_descriptors, verdict_for
 from puzzles_batch_h import split_reference  # canonical splitter (rounded float)
 
 ROOT = Path(__file__).parent
@@ -160,6 +160,22 @@ def _mjpeg_stream():
 # Cache all reference images on first access so we don't re-read from disk on every request.
 _REF_CACHE: dict[str, np.ndarray] = {}
 
+# Cache ORB features for the 9 reference cells of each puzzle. Computed once on
+# first use, reused for every check. On a Pi this is the main perf win — slot
+# matching now only computes features for the 9 photo slots (not also the 9 ref
+# cells × N requests).
+_REF_CELL_FEATURES: dict[str, list[tuple]] = {}
+
+
+def get_reference_cell_features(puzzle_id: str, reference: np.ndarray) -> list[tuple]:
+    cached = _REF_CELL_FEATURES.get(puzzle_id)
+    if cached is not None:
+        return cached
+    cells = split_reference(reference)
+    feats = [precompute_orb(c) for c in cells]
+    _REF_CELL_FEATURES[puzzle_id] = feats
+    return feats
+
 
 def load_all_references() -> dict[str, np.ndarray]:
     if not _REF_CACHE:
@@ -199,8 +215,8 @@ CLEAR_MATCH_FLOOR = 10  # per-slot inlier count above which a diagonal-best is c
 CLEAR_MATCH_COUNT_FOR_LENIENT = 6  # how many clear matches required to switch to lenient mode
 
 
-def _score_slots(photo_slots: list[np.ndarray], ref_cells: list[np.ndarray]) -> list[dict]:
-    """Two-pass per-slot scoring.
+def _score_slots(photo_slots: list[np.ndarray], ref_cell_features: list[tuple]) -> list[dict]:
+    """Two-pass per-slot scoring using PRECOMPUTED reference-cell ORB features.
 
     Pass 1: compute raw per-slot scores (own + best across all 9 ref cells).
     Determine "context_strong": how many slots have unambiguously correct
@@ -210,9 +226,15 @@ def _score_slots(photo_slots: list[np.ndarray], ref_cells: list[np.ndarray]) -> 
     count is low and the lenient rule stays OFF — preventing false MATCH
     on cubes whose noise-level scores happen to tie an off-cell.
     """
+    # Compute photo-slot features ONCE each (instead of 9× per slot inside the loop).
+    photo_features = [precompute_orb(s) for s in photo_slots]
+
     raw = []
-    for i, slot in enumerate(photo_slots):
-        per_ref = [orb_ransac_inliers(slot, rc) for rc in ref_cells]
+    for i, (ka, da) in enumerate(photo_features):
+        per_ref = [
+            ransac_inliers_from_descriptors(ka, da, kb, db)
+            for (kb, db) in ref_cell_features
+        ]
         best_idx = int(np.argmax(per_ref))
         raw.append((i, int(per_ref[i]), int(per_ref[best_idx]), best_idx))
 
@@ -267,8 +289,9 @@ def _summarise(slot_results: list[dict]) -> dict:
     }
 
 
-def run_method_a(photo: np.ndarray, reference: np.ndarray) -> dict:
-    """Method A: homography-based reference→photo alignment, then per-slot match."""
+def run_method_a(photo: np.ndarray, reference: np.ndarray, puzzle_id: str) -> dict:
+    """Method A: homography-based reference→photo alignment, then per-slot match.
+    puzzle_id is used as the cache key for precomputed reference-cell ORB features."""
     H, h_inliers, h_good = find_homography(photo, reference)
     if H is None or h_inliers < H_INLIERS_MIN_ALIGN:
         return {
@@ -284,9 +307,9 @@ def run_method_a(photo: np.ndarray, reference: np.ndarray) -> dict:
             "h_good_matches": h_good,
         }
     quads = project_cells(H, reference)
-    ref_cells = split_reference(reference)
+    ref_cell_features = get_reference_cell_features(puzzle_id, reference)
     photo_slots = [warp_quad(photo, q, out_size=256) for q in quads]
-    slots = _score_slots(photo_slots, ref_cells)
+    slots = _score_slots(photo_slots, ref_cell_features)
     overlay = _draw_verdict_overlay(photo, quads, slots)
     return {
         "ok": True,
@@ -340,10 +363,10 @@ def run_method_b(photo: np.ndarray, selected_puzzle_id: str, selected_reference:
     detected_ref = all_refs[best_id]
     quads = project_cells(best_H, detected_ref)
 
-    # Per-slot match against the SELECTED puzzle's reference
-    ref_cells = split_reference(selected_reference)
+    # Per-slot match against the SELECTED puzzle's reference (cached features).
+    ref_cell_features = get_reference_cell_features(selected_puzzle_id, selected_reference)
     photo_slots = [warp_quad(photo, q, out_size=256) for q in quads]
-    slots = _score_slots(photo_slots, ref_cells)
+    slots = _score_slots(photo_slots, ref_cell_features)
     summary = _summarise(slots)
 
     is_wrong_puzzle = best_id != selected_puzzle_id
@@ -380,7 +403,7 @@ def _build_response(photo: np.ndarray, puzzle_id: str, reference: np.ndarray, ph
     """Shared matcher pipeline used by /check (file upload) and /check-camera (live frame)."""
     cv2.setRNGSeed(42)
     run_id = uuid.uuid4().hex[:10]
-    method_a = run_method_a(photo, reference)
+    method_a = run_method_a(photo, reference, puzzle_id)
     method_b = run_method_b(photo, puzzle_id, reference) if run_b else None
 
     if method_a.get("ok"):

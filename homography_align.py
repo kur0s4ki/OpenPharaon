@@ -27,15 +27,30 @@ import numpy as np
 from pharaon_cv import _preprocess, orb_ransac_inliers
 
 
+_HOMOG_ORB = cv2.ORB_create(nfeatures=8000, scaleFactor=1.2, nlevels=10)
+
+# Module-level cache of reference-side ORB features keyed by id(reference_ndarray).
+# Avoids recomputing 8000-feature ORB on the reference for every request.
+_REF_FEATURE_CACHE: dict[int, tuple] = {}
+
+
+def _reference_features(reference: np.ndarray):
+    key = id(reference)
+    cached = _REF_FEATURE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    ga = _preprocess(reference, size=800)
+    ka, da = _HOMOG_ORB.detectAndCompute(ga, None)
+    _REF_FEATURE_CACHE[key] = (ka, da)
+    return ka, da
+
+
 def find_homography(photo: np.ndarray, reference: np.ndarray) -> tuple[np.ndarray | None, int, int]:
     """Return (H, inliers, good_matches) mapping reference -> photo coords."""
-    # Preprocess both at high resolution to capture enough detail
-    ga = _preprocess(reference, size=800)
+    # Reference-side ORB is cached across calls — only the photo side is computed each time.
+    ka, da = _reference_features(reference)
     gb = _preprocess(photo, size=800)
-
-    orb = cv2.ORB_create(nfeatures=8000, scaleFactor=1.2, nlevels=10)
-    ka, da = orb.detectAndCompute(ga, None)
-    kb, db = orb.detectAndCompute(gb, None)
+    kb, db = _HOMOG_ORB.detectAndCompute(gb, None)
     if da is None or db is None or len(ka) < 4 or len(kb) < 4:
         return None, 0, 0
 
