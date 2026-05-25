@@ -74,9 +74,13 @@ class Camera:
         self.read_successes = 0
 
     def _try_open(self):
-        """Try multiple backends in order, return the first one that
-        successfully opens AND delivers a frame."""
-        # Platform-preferred backend first, then fall back to ANY.
+        """Try multiple (backend, device-index) combinations, return the first
+        combination that opens AND actually delivers a frame.
+
+        On Raspberry Pi, the internal CSI/ISP subsystem grabs video0..video9-ish
+        numbering, so a plugged-in USB webcam can land at /dev/video1 or
+        higher. Trying indices 0..3 covers the common cases.
+        """
         system = platform.system().lower()
         backends: list[tuple[int, str]] = []
         if system == "windows":
@@ -86,23 +90,26 @@ class Camera:
         else:
             backends = [(cv2.CAP_ANY, "ANY")]
 
+        indices_to_try = [self.index] if self.index != 0 else [0, 1, 2, 3]
+
         tried = []
-        for backend, name in backends:
-            cap = cv2.VideoCapture(self.index, backend)
-            if not cap.isOpened():
-                tried.append(f"{name}=not-open")
+        for idx in indices_to_try:
+            for backend, name in backends:
+                cap = cv2.VideoCapture(idx, backend)
+                if not cap.isOpened():
+                    tried.append(f"idx{idx}/{name}=not-open")
+                    cap.release()
+                    continue
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+                cap.set(cv2.CAP_PROP_FPS, self.fps)
+                ok, frame = cap.read()
+                if ok and frame is not None:
+                    self.index = idx  # remember which one worked
+                    self.error = None
+                    return cap, f"idx{idx}/{name}"
+                tried.append(f"idx{idx}/{name}=no-frame")
                 cap.release()
-                continue
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-            cap.set(cv2.CAP_PROP_FPS, self.fps)
-            # Try reading a frame to confirm the backend actually delivers.
-            ok, frame = cap.read()
-            if ok and frame is not None:
-                self.error = None
-                return cap, name
-            tried.append(f"{name}=no-frame")
-            cap.release()
         self.error = "tried " + ", ".join(tried)
         return None, None
 
