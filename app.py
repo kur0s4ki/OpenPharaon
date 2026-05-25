@@ -538,11 +538,21 @@ def check():
 @app.get("/camera/status")
 def camera_status():
     available = CAMERA.ensure_started()
+    w = h = None
+    if available and CAMERA.cap is not None:
+        # Actual delivered resolution (may differ from what we requested if
+        # the cam can't match e.g. 1280x720).
+        w = int(CAMERA.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        h = int(CAMERA.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     return jsonify(
         available=available,
         error=CAMERA.error,
         read_successes=CAMERA.read_successes,
         read_failures=CAMERA.read_failures,
+        frame_width=w,
+        frame_height=h,
+        requested_width=CAMERA.width,
+        requested_height=CAMERA.height,
     )
 
 
@@ -1056,6 +1066,8 @@ LOCKED_HTML = r"""<!doctype html>
   .canvas-wrap { position:relative; max-width:100%; margin-top:12px; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
   .canvas-wrap img, .canvas-wrap canvas { display:block; max-width:100%; width:100%; height:auto; }
   .canvas-wrap canvas { position:absolute; top:0; left:0; cursor:crosshair; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 1100px) { .two-col { grid-template-columns: 1fr; } }
   .hint { color:var(--muted); font-size:13px; margin-top:8px; }
   .verdict { font-size:22px; font-weight:700; padding:12px 16px; border-radius:10px; text-align:center; letter-spacing:0.6px; margin-top:12px; }
   .verdict.solved { background:rgba(74,199,121,0.12); color:var(--ok); border:1px solid rgba(74,199,121,0.4); }
@@ -1077,32 +1089,34 @@ LOCKED_HTML = r"""<!doctype html>
   <h1>Locked-ROI mode (install-time calibration)</h1>
   <div class="hint">Camera is fixed. Draw 9 boxes <b>once</b> over the cube grid; every check after that crops those exact pixels — no homography, no auto-detection. <a href="/">← back to main</a></div>
 
-  <div class="panel">
-    <label for="puzzle">Puzzle</label>
-    <select id="puzzle">
-      {% for p in puzzles %}<option value="{{ p.id }}">{{ p.id }}</option>{% endfor %}
-    </select>
+  <div class="two-col">
+    <div class="panel">
+      <label for="puzzle">Puzzle</label>
+      <select id="puzzle">
+        {% for p in puzzles %}<option value="{{ p.id }}">{{ p.id }}</option>{% endfor %}
+      </select>
 
-    <div class="row">
-      <button id="snapBtn">Snap & Calibrate</button>
-      <button id="resumeBtn" class="secondary">Resume live preview</button>
-      <button id="clearBtn" class="secondary">Clear boxes</button>
-      <button id="saveBtn" class="secondary" disabled>Save calibration</button>
-      <button id="checkBtn">Check now (locked)</button>
-      <span id="status" class="hint"></span>
+      <div class="row">
+        <button id="snapBtn">Snap & Calibrate</button>
+        <button id="resumeBtn" class="secondary">Resume live</button>
+        <button id="clearBtn" class="secondary">Clear boxes</button>
+        <button id="saveBtn" class="secondary" disabled>Save calibration</button>
+        <button id="checkBtn">Check now (locked)</button>
+      </div>
+      <div class="hint" id="boxCounter">Boxes drawn: 0 / 9 — drag to draw, row-major order (r0c0, r0c1, r0c2, r1c0, …)</div>
+      <div class="hint" id="status"></div>
+
+      <div class="canvas-wrap">
+        <img id="bg" src="/stream" alt="camera">
+        <canvas id="overlay"></canvas>
+      </div>
     </div>
-    <div class="hint" id="boxCounter">Boxes drawn: 0 / 9 — drag to draw, top-left → bottom-right order: r0c0, r0c1, r0c2, r1c0, ...</div>
 
-    <div class="canvas-wrap">
-      <img id="bg" src="/stream" alt="camera">
-      <canvas id="overlay"></canvas>
+    <div id="resultPanel" class="panel" style="opacity:0.4; min-height: 200px;">
+      <div id="verdict" class="verdict" style="background: var(--panel-2); color: var(--muted); border-color: var(--border);">No check yet</div>
+      <div id="stats" class="hint" style="margin-top:8px"></div>
+      <div id="tableWrap"></div>
     </div>
-  </div>
-
-  <div id="resultPanel" class="panel" style="display:none">
-    <div id="verdict" class="verdict"></div>
-    <div id="stats" class="hint" style="margin-top:8px"></div>
-    <div id="tableWrap"></div>
   </div>
 </div>
 
@@ -1220,7 +1234,7 @@ $("saveBtn").onclick = async () => {
 
 $("checkBtn").onclick = async () => {
   $("checkBtn").disabled = true;
-  $("resultPanel").style.display = "none";
+  $("resultPanel").style.opacity = "1";
   statusEl.textContent = "Capturing & matching…";
   const fd = new FormData();
   fd.append("puzzle", $("puzzle").value);
@@ -1237,11 +1251,12 @@ $("checkBtn").onclick = async () => {
 };
 
 function renderResult(d) {
-  $("resultPanel").style.display = "";
+  $("resultPanel").style.opacity = "1";
   const v = $("verdict");
-  if (!d.ok) { v.className = "verdict error"; v.textContent = d.error || "error"; $("stats").textContent = ""; $("tableWrap").innerHTML = ""; return; }
+  if (!d.ok) { v.className = "verdict error"; v.textContent = d.error || "error"; v.style = ""; $("stats").textContent = ""; $("tableWrap").innerHTML = ""; return; }
   v.className = "verdict " + (d.verdict === "SOLVED" ? "solved" : "notsolved");
   v.textContent = d.verdict;
+  v.style = "";
   $("stats").textContent = `Match ${d.match_count} / Wrong ${d.wrong_face_count} / Empty ${d.empty_count}   |   ${d.elapsed_ms} ms`;
   let html = '<table><thead><tr><th>Slot</th><th>Own</th><th>Best</th><th>Best @</th><th>Verdict</th></tr></thead><tbody>';
   d.slots.forEach(s => {
@@ -1251,7 +1266,7 @@ function renderResult(d) {
   if (d.overlay_url) html += `<div style="margin-top:12px"><img src="${d.overlay_url}" style="max-width:100%; border-radius:8px"></div>`;
   $("tableWrap").innerHTML = html;
 }
-function renderError(m) { $("resultPanel").style.display = ""; const v=$("verdict"); v.className="verdict error"; v.textContent=m; $("stats").textContent=""; $("tableWrap").innerHTML=""; }
+function renderError(m) { $("resultPanel").style.opacity = "1"; const v=$("verdict"); v.className="verdict error"; v.textContent=m; v.style = ""; $("stats").textContent=""; $("tableWrap").innerHTML=""; }
 
 // Load existing calibration on page load
 (async () => {
