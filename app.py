@@ -296,6 +296,45 @@ def _summarise(slot_results: list[dict]) -> dict:
     }
 
 
+def _quads_are_sane(quads: list[np.ndarray]) -> tuple[bool, str]:
+    """Reject pathological homographies before downstream processing.
+
+    Catches mirror-flipped (reflected) homographies and severely degenerate
+    grids — both happen when RANSAC finds a 'valid' homography against
+    unrelated background content (wall paintings, decorations, etc.) that
+    happens to share enough features with the reference.
+    """
+    if len(quads) != 9:
+        return False, "expected 9 quads"
+
+    signed_areas = []
+    for q in quads:
+        x = q[:, 0]
+        y = q[:, 1]
+        # Shoelace formula: positive for CCW, negative for CW (= reflection)
+        sa = 0.5 * ((x[0]*y[1] - x[1]*y[0]) +
+                    (x[1]*y[2] - x[2]*y[1]) +
+                    (x[2]*y[3] - x[3]*y[2]) +
+                    (x[3]*y[0] - x[0]*y[3]))
+        signed_areas.append(sa)
+
+    # All cells must have the same winding as the reference (positive area
+    # under CCW vertex order). If any flipped, the homography is reflected.
+    pos = sum(1 for s in signed_areas if s > 0)
+    neg = sum(1 for s in signed_areas if s < 0)
+    if neg > 0:
+        return False, f"homography is reflected/flipped ({neg}/9 cells have inverted winding)"
+
+    # Cell sizes should be roughly equal (real cubes are uniform).
+    abs_areas = [abs(s) for s in signed_areas]
+    if min(abs_areas) <= 10:
+        return False, "one or more cells collapsed to near-zero area"
+    if max(abs_areas) / min(abs_areas) > 4.0:
+        return False, f"cell sizes vary too much (max/min = {max(abs_areas)/min(abs_areas):.1f}x)"
+
+    return True, ""
+
+
 def run_method_a(photo: np.ndarray, reference: np.ndarray, puzzle_id: str) -> dict:
     """Method A: homography-based reference→photo alignment, then per-slot match.
     puzzle_id is used as the cache key for precomputed reference-cell ORB features."""
@@ -314,6 +353,21 @@ def run_method_a(photo: np.ndarray, reference: np.ndarray, puzzle_id: str) -> di
             "h_good_matches": h_good,
         }
     quads = project_cells(H, reference)
+    sane, reason = _quads_are_sane(quads)
+    if not sane:
+        return {
+            "ok": False,
+            "method": "A",
+            "name": "Homography (reference-aligned)",
+            "error": (
+                f"Found {h_inliers} matched features but the resulting alignment is "
+                f"geometrically invalid ({reason}). The matcher likely locked onto "
+                f"non-puzzle content (a wall painting or decoration). Re-frame the "
+                f"camera so the cube grid fills most of the image."
+            ),
+            "h_inliers": h_inliers,
+            "h_good_matches": h_good,
+        }
     ref_cell_features = get_reference_cell_features(puzzle_id, reference)
     photo_slots = [warp_quad(photo, q, out_size=256) for q in quads]
     slots = _score_slots(photo_slots, ref_cell_features)
