@@ -11,6 +11,7 @@ Then open http://127.0.0.1:5000
 
 from __future__ import annotations
 
+import json
 import platform
 import threading
 import time
@@ -34,6 +35,7 @@ ROOT = Path(__file__).parent
 TESTS_DIR = ROOT / "tests"
 UPLOADS_DIR = ROOT / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
+CALIBRATION_PATH = ROOT / "calibration.json"
 
 ORB_INLIERS_MIN = 3           # per-slot match threshold; leaves margin above RANSAC noise
 H_INLIERS_MIN_RECOGNIZE = 8   # method B: minimum inliers to claim "this is puzzle X"
@@ -570,6 +572,124 @@ def check_camera():
     return jsonify(_build_response(photo, puzzle_id, reference, "live camera capture", run_b, t0))
 
 
+# ---------- Locked-ROI calibration (install-time, separate from /check) ----------
+
+def _load_calibration() -> dict | None:
+    if not CALIBRATION_PATH.exists():
+        return None
+    try:
+        return json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _save_calibration(data: dict) -> None:
+    CALIBRATION_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+@app.get("/snap")
+def snap():
+    """Return ONE still JPEG from the camera. Used by /locked's calibration canvas."""
+    if not CAMERA.ensure_started():
+        return Response(f"camera unavailable: {CAMERA.error}", status=503)
+    frame = CAMERA.latest()
+    if frame is None:
+        return Response("no frame yet", status=503)
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        return Response("encode failed", status=500)
+    return Response(buf.tobytes(), mimetype="image/jpeg")
+
+
+@app.get("/calibration")
+def get_calibration():
+    return jsonify(_load_calibration() or {"boxes": []})
+
+
+@app.post("/calibration")
+def post_calibration():
+    data = request.get_json(silent=True)
+    if not data or not isinstance(data.get("boxes"), list) or len(data["boxes"]) != 9:
+        return jsonify(ok=False, error="need exactly 9 boxes"), 400
+    cleaned = []
+    for b in data["boxes"]:
+        if not all(k in b for k in ("x1", "y1", "x2", "y2")):
+            return jsonify(ok=False, error="each box must have x1,y1,x2,y2"), 400
+        x1, y1, x2, y2 = int(b["x1"]), int(b["y1"]), int(b["x2"]), int(b["y2"])
+        if x2 <= x1 or y2 <= y1:
+            return jsonify(ok=False, error=f"invalid box: ({x1},{y1})-({x2},{y2})"), 400
+        cleaned.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2})
+    out = {"boxes": cleaned, "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    if "frame_size" in data:
+        out["frame_size"] = data["frame_size"]
+    _save_calibration(out)
+    return jsonify(ok=True, saved_at=out["saved_at"])
+
+
+@app.post("/check-locked")
+def check_locked():
+    """Per-slot match using the saved calibration boxes. No homography, no
+    projection — direct crop of fixed pixel rects. Fast and deterministic."""
+    t0 = time.perf_counter()
+    puzzle_id = request.form.get("puzzle", "").strip()
+    reference, err = _load_reference(puzzle_id)
+    if err:
+        return err
+
+    cal = _load_calibration()
+    if not cal or not cal.get("boxes"):
+        return jsonify(
+            ok=False,
+            error="No calibration saved. Open /locked and draw the 9 cube ROIs first.",
+        ), 400
+
+    if not CAMERA.ensure_started():
+        return jsonify(ok=False, error=f"camera unavailable: {CAMERA.error}"), 503
+    photo = CAMERA.latest()
+    if photo is None:
+        return jsonify(ok=False, error="no frame available yet"), 503
+
+    cv2.setRNGSeed(42)
+    h_photo, w_photo = photo.shape[:2]
+
+    photo_slots = []
+    quads = []
+    for b in cal["boxes"]:
+        x1 = max(0, min(int(b["x1"]), w_photo - 1))
+        y1 = max(0, min(int(b["y1"]), h_photo - 1))
+        x2 = max(x1 + 1, min(int(b["x2"]), w_photo))
+        y2 = max(y1 + 1, min(int(b["y2"]), h_photo))
+        crop = photo[y1:y2, x1:x2]
+        photo_slots.append(cv2.resize(crop, (256, 256), interpolation=cv2.INTER_AREA))
+        quads.append(np.array(
+            [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32))
+
+    ref_cell_features = get_reference_cell_features(puzzle_id, reference)
+    slots = _score_slots(photo_slots, ref_cell_features)
+    summary = _summarise(slots)
+
+    overlay = _draw_verdict_overlay(photo, quads, slots)
+    run_id = uuid.uuid4().hex[:10]
+    overlay_path = UPLOADS_DIR / f"{run_id}_locked_overlay.jpg"
+    cv2.imwrite(str(overlay_path), overlay, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+    return jsonify({
+        "ok": True,
+        "method": "locked",
+        "puzzle": puzzle_id,
+        "photo_label": "live camera capture (locked ROI)",
+        "elapsed_ms": int((time.perf_counter() - t0) * 1000),
+        "slots": slots,
+        **summary,
+        "overlay_url": f"/uploads/{overlay_path.name}",
+    })
+
+
+@app.get("/locked")
+def locked_page():
+    return render_template_string(LOCKED_HTML, puzzles=discover_puzzles())
+
+
 @app.get("/uploads/<path:name>")
 def serve_upload(name: str):
     return send_from_directory(UPLOADS_DIR, name)
@@ -909,6 +1029,245 @@ function renderError(msg) {
 </script>
 </body>
 </html>
+"""
+
+
+LOCKED_HTML = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenPharaon — Locked ROI</title>
+<style>
+  :root {
+    --bg: #14110d; --panel: #1f1b14; --panel-2: #2a241a;
+    --ink: #f3e6c8; --muted: #a89671; --gold: #d8a84b;
+    --ok: #4ac779; --warn: #f0a531; --bad: #e15252;
+    --border: #3a3122;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  h1 { font-size:22px; color:var(--gold); margin:0 0 12px; }
+  .wrap { max-width:1080px; margin:0 auto; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:18px; margin-bottom:16px; }
+  label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; text-transform:uppercase; letter-spacing:0.6px; }
+  select { background:var(--panel-2); color:var(--ink); border:1px solid var(--border); padding:10px 12px; border-radius:8px; width:100%; max-width:300px; }
+  button { background:var(--gold); color:#1a1408; border:0; border-radius:8px; padding:10px 16px; font-weight:600; cursor:pointer; margin-right:8px; }
+  button.secondary { background:var(--panel-2); color:var(--ink); border:1px solid var(--border); }
+  button:disabled { opacity:0.5; cursor:not-allowed; }
+  .canvas-wrap { position:relative; max-width:100%; margin-top:12px; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  .canvas-wrap img, .canvas-wrap canvas { display:block; max-width:100%; width:100%; height:auto; }
+  .canvas-wrap canvas { position:absolute; top:0; left:0; cursor:crosshair; }
+  .hint { color:var(--muted); font-size:13px; margin-top:8px; }
+  .verdict { font-size:22px; font-weight:700; padding:12px 16px; border-radius:10px; text-align:center; letter-spacing:0.6px; margin-top:12px; }
+  .verdict.solved { background:rgba(74,199,121,0.12); color:var(--ok); border:1px solid rgba(74,199,121,0.4); }
+  .verdict.notsolved { background:rgba(225,82,82,0.10); color:var(--bad); border:1px solid rgba(225,82,82,0.4); }
+  .verdict.error { background:rgba(240,165,49,0.10); color:var(--warn); border:1px solid rgba(240,165,49,0.4); font-size:16px; }
+  table { width:100%; border-collapse:collapse; margin-top:10px; font-size:13px; }
+  th, td { padding:6px 10px; border-bottom:1px solid var(--border); text-align:left; }
+  th { color:var(--muted); text-transform:uppercase; font-size:11px; }
+  .badge { padding:2px 8px; border-radius:4px; font-size:11px; font-weight:700; }
+  .badge.MATCH { background:rgba(74,199,121,0.18); color:var(--ok); }
+  .badge.WRONG_FACE { background:rgba(240,165,49,0.18); color:var(--warn); }
+  .badge.EMPTY { background:rgba(225,82,82,0.10); color:var(--bad); }
+  .row { display:flex; gap:8px; align-items:center; margin-top:10px; flex-wrap:wrap; }
+  a { color:var(--gold); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Locked-ROI mode (install-time calibration)</h1>
+  <div class="hint">Camera is fixed. Draw 9 boxes <b>once</b> over the cube grid; every check after that crops those exact pixels — no homography, no auto-detection. <a href="/">← back to main</a></div>
+
+  <div class="panel">
+    <label for="puzzle">Puzzle</label>
+    <select id="puzzle">
+      {% for p in puzzles %}<option value="{{ p.id }}">{{ p.id }}</option>{% endfor %}
+    </select>
+
+    <div class="row">
+      <button id="snapBtn">Snap & Calibrate</button>
+      <button id="resumeBtn" class="secondary">Resume live preview</button>
+      <button id="clearBtn" class="secondary">Clear boxes</button>
+      <button id="saveBtn" class="secondary" disabled>Save calibration</button>
+      <button id="checkBtn">Check now (locked)</button>
+      <span id="status" class="hint"></span>
+    </div>
+    <div class="hint" id="boxCounter">Boxes drawn: 0 / 9 — drag to draw, top-left → bottom-right order: r0c0, r0c1, r0c2, r1c0, ...</div>
+
+    <div class="canvas-wrap">
+      <img id="bg" src="/stream" alt="camera">
+      <canvas id="overlay"></canvas>
+    </div>
+  </div>
+
+  <div id="resultPanel" class="panel" style="display:none">
+    <div id="verdict" class="verdict"></div>
+    <div id="stats" class="hint" style="margin-top:8px"></div>
+    <div id="tableWrap"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const bg = $("bg"), canvas = $("overlay"), ctx = canvas.getContext("2d");
+const statusEl = $("status"), counterEl = $("boxCounter");
+let boxes = [];      // saved boxes in IMAGE-pixel coords {x1,y1,x2,y2}
+let dragging = false, startPt = null, drawingEnabled = false;
+let imgNaturalSize = null;
+
+function fitCanvasToImage() {
+  if (!imgNaturalSize) return;
+  canvas.width  = imgNaturalSize.w;
+  canvas.height = imgNaturalSize.h;
+  redraw();
+}
+
+bg.addEventListener("load", () => {
+  imgNaturalSize = { w: bg.naturalWidth, h: bg.naturalHeight };
+  fitCanvasToImage();
+});
+
+function clientToImage(ev) {
+  const rect = bg.getBoundingClientRect();
+  const sx = imgNaturalSize.w / rect.width;
+  const sy = imgNaturalSize.h / rect.height;
+  return {
+    x: Math.round((ev.clientX - rect.left) * sx),
+    y: Math.round((ev.clientY - rect.top) * sy),
+  };
+}
+
+function redraw(preview) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.font = "bold 22px sans-serif";
+  boxes.forEach((b, i) => {
+    ctx.strokeStyle = "#4ac779";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    const r = i / 3 | 0, c = i % 3;
+    const label = `r${r}c${c}`;
+    const padding = 6;
+    ctx.fillRect(b.x1 + 4, b.y1 + 4, 70, 28);
+    ctx.fillStyle = "#4ac779";
+    ctx.fillText(label, b.x1 + 8, b.y1 + 26);
+  });
+  if (preview) {
+    ctx.strokeStyle = "#d8a84b";
+    ctx.lineWidth = 3;
+    ctx.setLineDash([10, 6]);
+    ctx.strokeRect(preview.x1, preview.y1, preview.x2 - preview.x1, preview.y2 - preview.y1);
+    ctx.setLineDash([]);
+  }
+  counterEl.textContent = `Boxes drawn: ${boxes.length} / 9 — drag to draw next, row-major (r0c0, r0c1, r0c2, r1c0, …)`;
+  $("saveBtn").disabled = boxes.length !== 9;
+}
+
+canvas.addEventListener("mousedown", (ev) => {
+  if (!drawingEnabled || boxes.length >= 9) return;
+  dragging = true;
+  startPt = clientToImage(ev);
+});
+canvas.addEventListener("mousemove", (ev) => {
+  if (!dragging) return;
+  const p = clientToImage(ev);
+  redraw({
+    x1: Math.min(startPt.x, p.x), y1: Math.min(startPt.y, p.y),
+    x2: Math.max(startPt.x, p.x), y2: Math.max(startPt.y, p.y),
+  });
+});
+canvas.addEventListener("mouseup", (ev) => {
+  if (!dragging) return;
+  dragging = false;
+  const p = clientToImage(ev);
+  const b = {
+    x1: Math.min(startPt.x, p.x), y1: Math.min(startPt.y, p.y),
+    x2: Math.max(startPt.x, p.x), y2: Math.max(startPt.y, p.y),
+  };
+  if ((b.x2 - b.x1) < 10 || (b.y2 - b.y1) < 10) { redraw(); return; }
+  boxes.push(b);
+  redraw();
+});
+
+$("snapBtn").onclick = () => {
+  // Freeze the bg on the latest snapshot (so user can draw on a still image)
+  bg.src = "/snap?ts=" + Date.now();
+  drawingEnabled = true;
+  boxes = [];
+  statusEl.textContent = "Drawing mode: drag 9 boxes in row-major order.";
+};
+$("resumeBtn").onclick = () => {
+  bg.src = "/stream";
+  drawingEnabled = false;
+  statusEl.textContent = "Live preview resumed.";
+};
+$("clearBtn").onclick = () => { boxes = []; redraw(); };
+
+$("saveBtn").onclick = async () => {
+  if (boxes.length !== 9) return;
+  statusEl.textContent = "Saving…";
+  const res = await fetch("/calibration", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ boxes, frame_size: imgNaturalSize })
+  });
+  const data = await res.json();
+  if (data.ok) {
+    statusEl.textContent = `Calibration saved (${data.saved_at}).`;
+  } else {
+    statusEl.textContent = "Save failed: " + (data.error || "unknown");
+  }
+};
+
+$("checkBtn").onclick = async () => {
+  $("checkBtn").disabled = true;
+  $("resultPanel").style.display = "none";
+  statusEl.textContent = "Capturing & matching…";
+  const fd = new FormData();
+  fd.append("puzzle", $("puzzle").value);
+  try {
+    const res = await fetch("/check-locked", { method: "POST", body: fd });
+    const d = await res.json();
+    renderResult(d);
+  } catch (e) {
+    renderError("Network error: " + e.message);
+  } finally {
+    $("checkBtn").disabled = false;
+    statusEl.textContent = "";
+  }
+};
+
+function renderResult(d) {
+  $("resultPanel").style.display = "";
+  const v = $("verdict");
+  if (!d.ok) { v.className = "verdict error"; v.textContent = d.error || "error"; $("stats").textContent = ""; $("tableWrap").innerHTML = ""; return; }
+  v.className = "verdict " + (d.verdict === "SOLVED" ? "solved" : "notsolved");
+  v.textContent = d.verdict;
+  $("stats").textContent = `Match ${d.match_count} / Wrong ${d.wrong_face_count} / Empty ${d.empty_count}   |   ${d.elapsed_ms} ms`;
+  let html = '<table><thead><tr><th>Slot</th><th>Own</th><th>Best</th><th>Best @</th><th>Verdict</th></tr></thead><tbody>';
+  d.slots.forEach(s => {
+    html += `<tr><td><b>r${s.row}c${s.col}</b></td><td>${s.expected_inliers}</td><td>${s.best_inliers}</td><td>${s.best_match_label}</td><td><span class="badge ${s.verdict}">${s.verdict}</span></td></tr>`;
+  });
+  html += '</tbody></table>';
+  if (d.overlay_url) html += `<div style="margin-top:12px"><img src="${d.overlay_url}" style="max-width:100%; border-radius:8px"></div>`;
+  $("tableWrap").innerHTML = html;
+}
+function renderError(m) { $("resultPanel").style.display = ""; const v=$("verdict"); v.className="verdict error"; v.textContent=m; $("stats").textContent=""; $("tableWrap").innerHTML=""; }
+
+// Load existing calibration on page load
+(async () => {
+  try {
+    const r = await fetch("/calibration");
+    const d = await r.json();
+    if (d.boxes && d.boxes.length === 9) {
+      boxes = d.boxes;
+      statusEl.textContent = "Loaded saved calibration (" + (d.saved_at || "") + "). Click Snap & Calibrate to redraw.";
+      // Wait for image to load before drawing on it
+      if (imgNaturalSize) redraw();
+    }
+  } catch (e) {}
+})();
+</script>
+</body></html>
 """
 
 
